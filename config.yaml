@@ -1,0 +1,34 @@
+
+tiziano_mac_mini:
+  paths:
+    src_path: "/Users/tizianocausin/Desktop/static_dynamic/python_scripts/src"
+    data_path: "/Users/tizianocausin/sd_local"
+    useful_stuff_path: "/Users/tizianocausin/Desktop/useful_stuff/python_scripts/src"
+
+o2_cluster:
+  paths:
+    src_path: "/home/tic569/static_dynamic/python_scripts/src"
+    data_path: "/n/data2/hms/neurobio/livingstone/tiziano/sd_o2"
+    useful_stuff_path: "/home/tic569/useful_stuff/python_scripts/src"
+
+
+hpc_unitn:
+  paths:
+    src_path: "/home/tiziano.causin/static_dynamic/python_scripts/src"
+    data_path: "/home/tiziano.causin/sd_hpc_unitn"
+    useful_stuff_path: "/home/tiziano.causin/useful_stuff/python_scripts/src"
+
+
+dipsen_hpc:
+  paths:
+    src_path: "/home/tiziano.causin/static_dynamic/python_scripts/src"
+    data_path: "/mnt/storage/tier2/ingdev/projects/TIZIANO/sd_nas"
+    useful_stuff_path: "/home/tiziano.causin/useful_stuff/python_scripts/src"
+
+tiziano_local:
+  paths:
+    src_path: "/Users/tizianocausin/Desktop/static_dynamic/python_scripts/src"
+    data_path: "/Users/tizianocausin/sd_local"
+    useful_stuff_path: "/Users/tizianocausin/Desktop/useful_stuff/python_scripts/src"
+
+
