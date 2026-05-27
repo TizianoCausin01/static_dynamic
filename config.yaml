@@ -4,6 +4,7 @@ tiziano_mac_mini:
     src_path: "/Users/tizianocausin/Desktop/static_dynamic/python_scripts/src"
     data_path: "/Users/tizianocausin/sd_local"
     useful_stuff_path: "/Users/tizianocausin/Desktop/useful_stuff/python_scripts/src"
+    imagenet_path: "/Users/tizianocausin/datasets/imagenet"
 
 o2_cluster:
   paths:
