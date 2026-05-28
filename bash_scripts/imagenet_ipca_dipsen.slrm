@@ -1,0 +1,31 @@
+#!/bin/bash
+
+#SBATCH --nodes=1
+#SBATCH --time=36:00:00
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=1
+#SBATCH --gres=gpu:1
+#SBATCH --mem=150G
+#SBATCH --partition=gpu
+#SBATCH --job-name=imagenet_ipca
+#SBATCH --output=/home/tiziano.causin/output_jobs/%x.%j.out
+
+set -e
+source ~/.bashrc
+cd /home/tiziano.causin/static_dynamic/python_scripts/scripts
+conda deactivate
+source ~/static_dynamic/.venv/bin/activate
+
+export OPENBLAS_NUM_THREADS="${SLURM_CPUS_PER_TASK:-1}"
+export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-1}"
+export MKL_NUM_THREADS="${SLURM_CPUS_PER_TASK:-1}"
+export NUMEXPR_NUM_THREADS="${SLURM_CPUS_PER_TASK:-1}"
+
+python3 run_imagenet_ipca.py \
+    --model_name "$model_name" \
+    --pkg "$pkg" \
+    --pooling "$pooling" \
+    --n_components "$n_components" \
+    --batch_size "$batch_size" \
+    --img_size "$img_size" \
+    --num-workers "$SLURM_N_PROC"
