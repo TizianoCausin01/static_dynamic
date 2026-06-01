@@ -37,37 +37,39 @@ parser.add_argument("--attn-implementation", default='sdpa', help="Optional atte
 
 cfg = parser.parse_args()
 print_wise(cfg)
+def main():
+    ann = imgANN(
+        model_name=cfg.model_name,
+        pkg=cfg.pkg,
+        img_size=cfg.img_size,
+        pooling=cfg.pooling,
+        weights_type=cfg.weights_type,
+        dtype=torch.float32,
+        attn_implementation=cfg.attn_implementation,
+        repo_url=cfg.repo_url,
+        revision=cfg.revision,
+    )
+    target_layers = ann.get_relevant_layers()
+    print_wise(f"Running ImageNet iPCA for {cfg.model_name}: {len(target_layers)} layers")
 
-ann = imgANN(
-    model_name=cfg.model_name,
-    pkg=cfg.pkg,
-    img_size=cfg.img_size,
-    pooling=cfg.pooling,
-    weights_type=cfg.weights_type,
-    dtype=torch.float32,
-    attn_implementation=cfg.attn_implementation,
-    repo_url=cfg.repo_url,
-    revision=cfg.revision,
-)
-target_layers = ann.get_relevant_layers()
-print_wise(f"Running ImageNet iPCA for {cfg.model_name}: {len(target_layers)} layers")
+    _, loader = imagenet_val_dataloader(
+        paths,
+        cfg.img_size,
+        cfg.batch_size,
+        num_workers=cfg.num_workers,
+        shuffle=True,
+    )
 
-_, loader = imagenet_val_dataloader(
-    paths,
-    cfg.img_size,
-    cfg.batch_size,
-    num_workers=cfg.num_workers,
-    shuffle=True,
-)
+    ipca_imagenet_wrapper(
+        paths=paths,
+        rank=0,
+        target_layers=target_layers,
+        ann=ann,
+        loader=loader,
+        n_components=cfg.n_components,
+        batch_size=cfg.batch_size,
+    )
 
-ipca_imagenet_wrapper(
-    paths=paths,
-    rank=0,
-    target_layers=target_layers,
-    ann=ann,
-    loader=loader,
-    n_components=cfg.n_components,
-    batch_size=cfg.batch_size,
-)
-
+if __name__ == "__main__":
+    main()
 

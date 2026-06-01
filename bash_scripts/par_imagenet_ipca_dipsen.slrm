@@ -2,10 +2,10 @@
 
 #SBATCH --nodes=1
 #SBATCH --time=36:00:00
-#SBATCH --ntasks=5
+#SBATCH --ntasks=3
 #SBATCH --cpus-per-task=1
 #SBATCH --gres=gpu:1
-#SBATCH --mem=70G
+#SBATCH --mem=100G
 #SBATCH --partition=all-compute-gpu
 #SBATCH --job-name=par_imagenet_ipca
 #SBATCH --output=/home/tiziano.causin/output_jobs/%x.%j.out
