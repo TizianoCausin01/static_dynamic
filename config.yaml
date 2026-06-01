@@ -23,8 +23,9 @@ hpc_unitn:
 dipsen_hpc:
   paths:
     src_path: "/home/tiziano.causin/static_dynamic/python_scripts/src"
-    data_path: "/mnt/storage/tier2/ingdev/projects/TIZIANO/sd_nas"
+    data_path: "/mnt/storage/tier2/morwur/Projects/TIZIANO/sd_nas"
     useful_stuff_path: "/home/tiziano.causin/useful_stuff/python_scripts/src"
+    imagenet_path: "/mnt/storage/tier2/morwur/Projects/TIZIANO/datasets/imagenet"
 
 tiziano_local:
   paths:
