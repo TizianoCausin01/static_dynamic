@@ -11,7 +11,7 @@ o2_cluster:
     src_path: "/home/tic569/static_dynamic/python_scripts/src"
     data_path: "/n/data2/hms/neurobio/livingstone/tiziano/sd_o2"
     useful_stuff_path: "/home/tic569/useful_stuff/python_scripts/src"
-
+    imagenet_path: "/n/data2/hms/neurobio/livingstone/tiziano/datasets/imagenet" 
 
 hpc_unitn:
   paths:
