@@ -61,9 +61,9 @@ def ipca_imagenet_wrapper(paths, rank, target_layers, ann, loader, n_components,
     existing_layers = [layer for layer in target_layers if save_paths[layer].exists()]
 
     if existing_layers:
-        print_wise(f"Skipping existing {ann.model_name} layers: {', '.join(existing_layers)}")
+        print_wise(f"Skipping existing {ann.model_name} layers: {', '.join(existing_layers)}", rank=rank)
     if not missing_layers:
-        print_wise(f"All requested {ann.model_name} iPCA files already exist; skipping iPCA.")
+        print_wise(f"All requested {ann.model_name} iPCA files already exist; skipping iPCA.", rank=rank)
         return {}
 
     # Register hooks only for layers that still need to be computed.
@@ -86,5 +86,6 @@ def ipca_imagenet_wrapper(paths, rank, target_layers, ann, loader, n_components,
     for layer in missing_layers:
         save_paths[layer].parent.mkdir(parents=True, exist_ok=True)
         joblib.dump(ipcas[layer], save_paths[layer])
+        print_wise(f"PCs saved at {save_paths[layer]}", rank=rank)
     return ipcas
 # EOF
