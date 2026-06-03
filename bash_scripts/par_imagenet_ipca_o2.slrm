@@ -1,0 +1,39 @@
+#!/bin/bash
+
+#SBATCH --nodes=1
+#SBATCH --time=10:00:00
+#SBATCH --ntasks=9 # number of processes
+#SBATCH --gres=gpu:1  
+#SBATCH --cpus-per-task=1
+#SBATCH --mem=100G
+#SBATCH --account=livingstone       # account name
+#SBATCH --partition=gpu # partition name
+#SBATCH --job-name=par_imagenet_ipca
+#SBATCH --output=/home/tic569/output_jobs/%x.%j.out   # file name will be *job_name*.*job_id*
+
+#e.g. to run
+# sbatch --export=ALL,model_name=dino_v3_l,pkg=hf,pooling=all,n_components=1000,batch_size=1024,img_size=384 \par_imagenet_ipca_o2.slrm
+
+cd /home/tic569/static_dynamic/python_scripts/scripts
+
+module load gcc/14.2.0
+module load cuda/12.8
+module load python/3.13.1
+module load openmpi
+
+source ~/static_dynamic/.venv/bin/activate
+
+export HF_HUB_OFFLINE=1
+export TRANSFORMERS_OFFLINE=1
+export HF_HOME=/home/tic569/.cache/huggingface
+
+
+mpiexec -np ${SLURM_NTASKS} python3 run_par_imagenet_ipca.py \
+    --model_name "$model_name" \
+    --pkg "$pkg" \
+    --pooling "$pooling" \
+    --n_components "$n_components" \
+    --batch_size "$batch_size" \
+    --img_size "$img_size" \
+    --num-workers "0"\
+
