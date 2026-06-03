@@ -38,6 +38,19 @@ cfg = parser.parse_args()
 task_list = get_relevant_output_layers(cfg.model_name, cfg.pkg)
 task_list = [[l,] for l in task_list] # because the function accepts only lists as layers 
 _, rank, _ = parallel_setup()
+if ENV == "dipsen_hpc" or ENV == "o2_cluster": # only if I'm on a cluster
+    n_gpus = torch.cuda.device_count()
+    if rank == 0: # rank 0 (the master) will have the cpu
+        device = "cpu"
+    else:
+        if n_gpus == 0: # if there is no gpu available
+            device = get_device()
+        else: # otherwise evenly distribute the gpus among processes
+            gpu_id = (rank - 1) % n_gpus # the remainder of the division yields the gpu
+            device = torch.device(f"cuda:{gpu_id}") 
+else: # if I'm on the local, I want mps to be detected instead
+    device = get_device()
+
 if rank != 0:
     ann = imgANN(
         model_name=cfg.model_name,
@@ -49,6 +62,7 @@ if rank != 0:
         attn_implementation=cfg.attn_implementation,
         repo_url=cfg.repo_url,
         revision=cfg.revision,
+        device=device
     )
     print_wise(ann, rank=rank)
     _, loader = imagenet_val_dataloader(
@@ -64,4 +78,4 @@ else:
     loader = None
 # end if rank != 0:
 
-master_workers_queue(task_list, paths, ipca_imagenet_wrapper, *(ann, loader, cfg.n_components, cfg.batch_size)) 
+master_workers_queue(task_list, paths, ipca_imagenet_wrapper, *(ann, loader, cfg.n_components, cfg.batch_size), **{"device": device}) 

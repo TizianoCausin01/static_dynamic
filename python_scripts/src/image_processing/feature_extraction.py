@@ -68,7 +68,7 @@ def ipca_imagenet_wrapper(paths, rank, target_layers, ann, loader, n_components,
 
     # Register hooks only for layers that still need to be computed.
     ann.features = {}
-    ann.create_forward_hook(missing_layers)
+    ann.create_forward_hook(layer_names=missing_layers)
 
     # Create one iPCA object per missing layer, capped by that layer's feature dimensionality.
     ipcas = {
@@ -80,7 +80,7 @@ def ipca_imagenet_wrapper(paths, rank, target_layers, ann, loader, n_components,
     }
 
     # Fit iPCA objects by streaming ImageNet validation activations batch by batch.
-    ipcas = compute_img_ipca(ann, loader, ipcas, device)
+    ipcas = compute_img_ipca(ann, loader, ipcas, device, rank=rank)
 
     # Save only the newly fitted layer-specific iPCA objects.
     for layer in missing_layers:
