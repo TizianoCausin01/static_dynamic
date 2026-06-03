@@ -51,7 +51,7 @@ INPUT:
 OUTPUT:
     - ipcas: dict[str, IncrementalPCA] -> newly fitted iPCA objects keyed by layer name
 """
-def ipca_imagenet_wrapper(paths, rank, target_layers, ann, loader, n_components, batch_size, device=get_device()):
+def ipca_imagenet_wrapper(paths, rank, target_layers, ann, loader, n_components, batch_size, sub_batch_size=None, device=get_device()):
     # Build all expected output paths and keep only layers whose files do not exist yet.
     save_paths = {
         layer: save_imagenet_val_ipca(paths, ann.model_name, layer, n_components, ann.pooling)
@@ -80,7 +80,7 @@ def ipca_imagenet_wrapper(paths, rank, target_layers, ann, loader, n_components,
     }
 
     # Fit iPCA objects by streaming ImageNet validation activations batch by batch.
-    ipcas = compute_img_ipca(ann, loader, ipcas, device, rank=rank)
+    ipcas = compute_img_ipca(ann, loader, ipcas, device, sub_batch_size=sub_batch_size, rank=rank)
 
     # Save only the newly fitted layer-specific iPCA objects.
     for layer in missing_layers:

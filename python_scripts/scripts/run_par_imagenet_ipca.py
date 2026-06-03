@@ -12,7 +12,7 @@ sys.path.append(paths["useful_stuff_path"])
 from image_processing.feature_extraction import ipca_imagenet_wrapper
 from project_specific_utils.dataloader import imagenet_val_dataloader
 from useful_stuff.image_processing.computational_models import imgANN, get_relevant_output_layers
-from useful_stuff.general_utils import print_wise
+from useful_stuff.general_utils import print_wise, get_device
 from useful_stuff.parallel.parallel_funcs import parallel_setup, master_workers_queue
 
 # e.g. to call it:
@@ -25,6 +25,7 @@ parser.add_argument("--model_name", required=True,)
 parser.add_argument("--pkg", required=True)
 parser.add_argument("--n_components", required=True, type=int)
 parser.add_argument("--batch_size", required=True, type=int)
+parser.add_argument("--sub_batch_size", type=int)
 parser.add_argument("--pooling")
 parser.add_argument("--img_size", type=int)
 parser.add_argument("--num-workers", type=int, default=0, help="DataLoader worker count.")
@@ -78,4 +79,4 @@ else:
     loader = None
 # end if rank != 0:
 
-master_workers_queue(task_list, paths, ipca_imagenet_wrapper, *(ann, loader, cfg.n_components, cfg.batch_size), **{"device": device}) 
+master_workers_queue(task_list, paths, ipca_imagenet_wrapper, *(ann, loader, cfg.n_components, cfg.batch_size), **{"device": device, "sub_batch_size": cfg.sub_batch_size}) 
