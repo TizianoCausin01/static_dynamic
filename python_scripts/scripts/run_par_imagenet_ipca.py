@@ -9,7 +9,7 @@ with open("../../config.yaml", "r") as f:
 paths = config[ENV]["paths"]
 sys.path.append(paths["src_path"])
 sys.path.append(paths["useful_stuff_path"])
-from image_processing.feature_extraction import ipca_imagenet_wrapper, paths
+from image_processing.feature_extraction import ipca_imagenet_wrapper
 from project_specific_utils.dataloader import imagenet_val_dataloader
 from useful_stuff.image_processing.computational_models import imgANN, get_relevant_output_layers
 from useful_stuff.general_utils import print_wise
@@ -35,7 +35,7 @@ parser.add_argument("--attn-implementation", default='sdpa', help="Optional atte
 
 
 cfg = parser.parse_args()
-task_list = get_relevant_output_layers(cfg.model_name)
+task_list = get_relevant_output_layers(cfg.model_name, cfg.pkg)
 task_list = [[l,] for l in task_list] # because the function accepts only lists as layers 
 _, rank, _ = parallel_setup()
 if rank != 0:
