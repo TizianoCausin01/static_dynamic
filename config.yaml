@@ -5,6 +5,7 @@ tiziano_mac_mini:
     data_path: "/Users/tizianocausin/sd_local"
     useful_stuff_path: "/Users/tizianocausin/Desktop/useful_stuff/python_scripts/src"
     imagenet_path: "/Users/tizianocausin/datasets/imagenet"
+    livingstone_lab: "/Users/tizianocausin/livingstone_lab_local"
 
 o2_cluster:
   paths:
@@ -12,6 +13,7 @@ o2_cluster:
     data_path: "/n/data2/hms/neurobio/livingstone/tiziano/sd_o2"
     useful_stuff_path: "/home/tic569/useful_stuff/python_scripts/src"
     imagenet_path: "/n/data2/hms/neurobio/livingstone/tiziano/datasets/imagenet" 
+    livingstone_lab: "/n/data2/hms/neurobio/livingstone"
 
 hpc_unitn:
   paths:
@@ -32,5 +34,5 @@ tiziano_local:
     src_path: "/Users/tizianocausin/Desktop/static_dynamic/python_scripts/src"
     data_path: "/Users/tizianocausin/sd_local"
     useful_stuff_path: "/Users/tizianocausin/Desktop/useful_stuff/python_scripts/src"
-
+    livingstone_lab: "/Volumes/LivingstoneLab"
 
