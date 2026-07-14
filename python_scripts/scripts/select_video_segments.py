@@ -157,10 +157,11 @@ def move_to_discarded(video_path, discarded_dir):
 
 
 class EndingFrameSelector:
-    def __init__(self, video_info, segment_duration, display_width):
+    def __init__(self, video_info, segment_duration, display_width, decode_display_width):
         self.video_info = video_info
         self.segment_duration = segment_duration
         self.display_width = display_width
+        self.decode_display_width = decode_display_width
         self.window_name = f"Select ending frame - {video_info.path.name}"
         self.result = None
         self.min_frame_index = min(
@@ -302,10 +303,19 @@ class EndingFrameSelector:
             ok, frame = cap.read()
             if not ok or frame is None:
                 break
-            frames.append((frame_index, frame))
+            frames.append((frame_index, self._downsample_for_display(frame)))
 
         cap.release()
-        return frames
+        if frames:
+            return frames
+
+        fallback_frames = []
+        for frame_index in range(start_frame_index, end_frame_index + 1):
+            frame = self._read_frame(frame_index)
+            if frame is None:
+                break
+            fallback_frames.append((frame_index, frame))
+        return fallback_frames
 
     def _play_frames_at_video_fps(self, window_name, frames):
         frame_period = 1 / self.video_info.fps
@@ -395,14 +405,49 @@ class EndingFrameSelector:
         if cached_frame is not None:
             return cached_frame.copy()
 
-        self.cap.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
-        ok, frame = self.cap.read()
-        if not ok or frame is None:
+        frame = self._read_frame_direct(frame_index)
+        if frame is None:
+            frame = self._read_frame_sequential(frame_index)
+        if frame is None and frame_index > 0:
+            frame = self._read_frame_direct(frame_index - 1)
+        if frame is None:
             return None
+
+        frame = self._downsample_for_display(frame)
 
         if len(self.frame_cache) > 12:
             self.frame_cache.clear()
         self.frame_cache[frame_index] = frame.copy()
+        return frame
+
+    def _downsample_for_display(self, frame):
+        if self.decode_display_width <= 0 or frame.shape[1] <= self.decode_display_width:
+            return frame
+
+        scale = self.decode_display_width / frame.shape[1]
+        new_size = (self.decode_display_width, int(frame.shape[0] * scale))
+        return cv2.resize(frame, new_size, interpolation=cv2.INTER_AREA)
+
+    def _read_frame_direct(self, frame_index):
+        self.cap.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
+        ok, frame = self.cap.read()
+        if not ok or frame is None:
+            return None
+        return frame
+
+    def _read_frame_sequential(self, frame_index):
+        cap = cv2.VideoCapture(str(self.video_info.path))
+        if not cap.isOpened():
+            return None
+
+        frame = None
+        for _ in range(frame_index + 1):
+            ok, frame = cap.read()
+            if not ok or frame is None:
+                frame = None
+                break
+
+        cap.release()
         return frame
 
     def _render_frame(self):
@@ -554,6 +599,15 @@ def parse_args():
         help="Maximum total display width for the review window. Use 0 for original size.",
     )
     parser.add_argument(
+        "--decode_display_width",
+        type=int,
+        default=960,
+        help=(
+            "Downsample decoded frames to this width for GUI display/review only. "
+            "Saved clips still use the original full-resolution source video. Use 0 to disable."
+        ),
+    )
+    parser.add_argument(
         "--force",
         action="store_true",
         help="Show videos even if a segment with this source video prefix already exists.",
@@ -577,6 +631,8 @@ def main():
 
     if args.duration <= 0:
         raise ValueError("--duration must be positive.")
+    if args.decode_display_width < 0:
+        raise ValueError("--decode_display_width must be zero or positive.")
     if not input_dir.exists():
         raise FileNotFoundError(input_dir)
 
@@ -617,6 +673,7 @@ def main():
             video_info=video_info,
             segment_duration=args.duration,
             display_width=args.display_width,
+            decode_display_width=args.decode_display_width,
         )
         decision, ending_frame_index = selector.run()
         end_seconds = min(video_info.duration, (ending_frame_index + 1) / video_info.fps)

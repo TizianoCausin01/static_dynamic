@@ -1,4 +1,5 @@
 import argparse
+import shutil
 import subprocess
 import time
 from dataclasses import dataclass
@@ -73,6 +74,22 @@ def output_path_for(video_path, output_dir, source_square_size, output_size):
     return output_dir / f"{video_path.stem}__crop_{source_square_size}px_to_{output_size}x{output_size}.mp4"
 
 
+def move_to_discarded(video_path, discarded_dir):
+    discarded_dir.mkdir(parents=True, exist_ok=True)
+    destination = discarded_dir / video_path.name
+    if not destination.exists():
+        shutil.move(str(video_path), str(destination))
+        return destination
+
+    for counter in range(2, 1000):
+        candidate = discarded_dir / f"{video_path.stem}__discarded_{counter}{video_path.suffix}"
+        if not candidate.exists():
+            shutil.move(str(video_path), str(candidate))
+            return candidate
+
+    raise RuntimeError(f"Could not find a free discarded filename for {video_path.name}")
+
+
 def clamp_axis(center, frame_size, crop_size):
     if frame_size <= crop_size:
         return frame_size / 2
@@ -118,18 +135,31 @@ def crop_frame(frame, center, crop_width, crop_height):
 
 
 class CropPathSelector:
-    def __init__(self, video_info, source_square_size, output_size, display_width):
+    def __init__(
+        self,
+        video_info,
+        source_square_size,
+        output_size,
+        display_width,
+        decode_display_width,
+        preload_display_frames,
+    ):
         self.video_info = video_info
         self.source_square_size = source_square_size
         self.output_size = output_size
         self.display_width = display_width
+        self.decode_display_width = decode_display_width
+        self.preload_display_frames = preload_display_frames
         self.window_name = f"Select crop path - {video_info.path.name}"
         self.result = None
         self.current_frame_index = 0
         self.pending_frame_index = 0
         self.setting_trackbar = False
         self.frame_cache = {}
+        self.display_frames = None
+        self.display_to_source_scale = 1.0
         self.last_render_scale = 1.0
+        self.last_display_to_source_scale = 1.0
         self.last_render_top_bar = 0
         self.last_render_video_width = video_info.width
         self.last_render_video_height = video_info.height
@@ -143,6 +173,8 @@ class CropPathSelector:
         self.cap = cv2.VideoCapture(str(video_info.path))
         if not self.cap.isOpened():
             raise ValueError(f"Could not open {video_info.path}")
+        if self.preload_display_frames:
+            self.display_frames = self._preload_display_frames()
 
     def run(self):
         cv2.namedWindow(self.window_name, cv2.WINDOW_NORMAL)
@@ -190,8 +222,8 @@ class CropPathSelector:
         if x >= self.last_render_video_width or video_y >= self.last_render_video_height:
             return
 
-        original_x = x / self.last_render_scale
-        original_y = video_y / self.last_render_scale
+        original_x = x * self.last_display_to_source_scale / self.last_render_scale
+        original_y = video_y * self.last_display_to_source_scale / self.last_render_scale
         self._set_keyframe(self.current_frame_index, (original_x, original_y))
 
     def _handle_key(self, key):
@@ -230,10 +262,14 @@ class CropPathSelector:
             self._adjust_square_size(-5)
         elif ascii_key == ord("i"):
             self._set_keyframe(self.current_frame_index, self.current_center)
+        elif ascii_key == ord("r"):
+            self._reset_keyframes_to_center()
         elif ascii_key in (ord("d"), 8):
             self._delete_current_keyframe()
         elif ascii_key == ord("n"):
             self.result = "skip"
+        elif ascii_key == ord("x"):
+            self.result = "discard"
         elif ascii_key == ord("p"):
             subprocess.run(["open", str(self.video_info.path)], check=False)
         elif ascii_key == ord("q") or key == 27:
@@ -272,6 +308,11 @@ class CropPathSelector:
 
     def _read_frame(self, frame_index):
         frame_index = min(max(0, int(frame_index)), self.video_info.frame_count - 1)
+        if self.display_frames:
+            frame_index = min(frame_index, len(self.display_frames) - 1)
+            self.last_display_to_source_scale = self.display_to_source_scale
+            return self.display_frames[frame_index].copy()
+
         cached_frame = self.frame_cache.get(frame_index)
         if cached_frame is not None:
             return cached_frame.copy()
@@ -281,10 +322,43 @@ class CropPathSelector:
         if not ok or frame is None:
             return None
 
+        frame = self._downsample_for_display(frame)
+
         if len(self.frame_cache) > 16:
             self.frame_cache.clear()
         self.frame_cache[frame_index] = frame.copy()
         return frame
+
+    def _preload_display_frames(self):
+        frames = []
+        cap = cv2.VideoCapture(str(self.video_info.path))
+        if not cap.isOpened():
+            return frames
+
+        print(f"Preloading low-res display frames for {self.video_info.path.name}...")
+        while True:
+            ok, frame = cap.read()
+            if not ok or frame is None:
+                break
+            frame, display_to_source_scale = self._downsample_frame_for_display(frame)
+            self.display_to_source_scale = display_to_source_scale
+            frames.append(frame)
+
+        cap.release()
+        print(f"Loaded {len(frames)} display frames.")
+        return frames
+
+    def _downsample_for_display(self, frame):
+        frame, display_to_source_scale = self._downsample_frame_for_display(frame)
+        self.last_display_to_source_scale = display_to_source_scale
+        return frame
+
+    def _downsample_frame_for_display(self, frame):
+        if self.decode_display_width <= 0 or frame.shape[1] <= self.decode_display_width:
+            return frame, 1.0
+        scale = self.decode_display_width / frame.shape[1]
+        new_size = (self.decode_display_width, int(frame.shape[0] * scale))
+        return cv2.resize(frame, new_size, interpolation=cv2.INTER_AREA), 1 / scale
 
     def _set_keyframe(self, frame_index, center):
         self.keyframes[int(frame_index)] = clamp_center(
@@ -293,6 +367,14 @@ class CropPathSelector:
             self.source_square_size,
             self.source_square_size,
         )
+        self._show_frame(self.current_frame_index)
+
+    def _reset_keyframes_to_center(self):
+        center = center_for_video(self.video_info)
+        self.keyframes = {
+            0: center,
+            self.video_info.frame_count - 1: center,
+        }
         self._show_frame(self.current_frame_index)
 
     def _adjust_square_size(self, delta):
@@ -336,14 +418,20 @@ class CropPathSelector:
         rendered[top_bar_height:top_bar_height + height, :, :] = display_frame
 
         center_x, center_y = self.current_center
-        left = int(round((center_x - self.source_square_size / 2) * scale))
-        top = int(round((center_y - self.source_square_size / 2) * scale)) + top_bar_height
-        right = int(round((center_x + self.source_square_size / 2) * scale))
-        bottom = int(round((center_y + self.source_square_size / 2) * scale)) + top_bar_height
+        display_center_x = center_x / self.last_display_to_source_scale
+        display_center_y = center_y / self.last_display_to_source_scale
+        display_square_size = self.source_square_size / self.last_display_to_source_scale
+        left = int(round((display_center_x - display_square_size / 2) * scale))
+        top = int(round((display_center_y - display_square_size / 2) * scale)) + top_bar_height
+        right = int(round((display_center_x + display_square_size / 2) * scale))
+        bottom = int(round((display_center_y + display_square_size / 2) * scale)) + top_bar_height
         cv2.rectangle(rendered, (left, top), (right, bottom), (0, 255, 255), 2)
         cv2.drawMarker(
             rendered,
-            (int(round(center_x * scale)), int(round(center_y * scale)) + top_bar_height),
+            (
+                int(round(display_center_x * scale)),
+                int(round(display_center_y * scale)) + top_bar_height,
+            ),
             (0, 255, 255),
             markerType=cv2.MARKER_CROSS,
             markerSize=16,
@@ -376,9 +464,9 @@ class CropPathSelector:
             )
 
         controls = (
-            "click: set crop center | i: add keyframe | d: delete keyframe | "
+            "click: set crop center | i: add keyframe | r: reset all centers | d: delete keyframe | "
             "+/-: square size 25px | [/]: 5px | f/g: first/last | arrows/wheel: move | "
-            "c: center crop | s: review | n: skip | p: play | q: quit"
+            "c: center crop | s: review | n: skip | x: discard | p: play | q: quit"
         )
         cv2.putText(
             rendered,
@@ -592,6 +680,12 @@ def parse_args():
         help="Folder for cropped videos. Defaults to SEGMENTS_DIR/cropped_segments.",
     )
     parser.add_argument(
+        "--discarded_dir",
+        type=Path,
+        default=None,
+        help="Folder for crop-stage discarded videos. Defaults to SEGMENTS_DIR/discarded_cropping_vids.",
+    )
+    parser.add_argument(
         "--source_square_size",
         type=int,
         default=500,
@@ -610,6 +704,20 @@ def parse_args():
         help="Maximum display width for selection/review windows. Use 0 for original size.",
     )
     parser.add_argument(
+        "--decode_display_width",
+        type=int,
+        default=960,
+        help=(
+            "Downsample decoded frames to this width for GUI selection only. "
+            "Cropping/saving still uses original full-resolution frames. Use 0 to disable."
+        ),
+    )
+    parser.add_argument(
+        "--no_preload_display_frames",
+        action="store_true",
+        help="Disable preloading low-resolution display frames before selection.",
+    )
+    parser.add_argument(
         "--force",
         action="store_true",
         help="Review videos even if the cropped output already exists.",
@@ -625,13 +733,21 @@ def main():
         if args.output_dir is not None
         else segments_dir / "cropped_segments"
     )
+    discarded_dir = (
+        args.discarded_dir.expanduser().resolve()
+        if args.discarded_dir is not None
+        else segments_dir / "discarded_cropping_vids"
+    )
 
     if args.source_square_size <= 0 or args.output_size <= 0:
         raise ValueError("--source_square_size and --output_size must be positive.")
+    if args.decode_display_width < 0:
+        raise ValueError("--decode_display_width must be zero or positive.")
     if not segments_dir.exists():
         raise FileNotFoundError(segments_dir)
 
     output_dir.mkdir(parents=True, exist_ok=True)
+    discarded_dir.mkdir(parents=True, exist_ok=True)
     videos = list(iter_video_paths(segments_dir))
     pending_videos = [
         video for video in videos
@@ -642,9 +758,11 @@ def main():
     print(f"{len(pending_videos)} videos need cropping")
     print(
         "Controls: click = set crop center at current frame, i = add intermediate keyframe, "
-        "d = delete current keyframe, f/g = first/last frame, arrows or mouse wheel = move, "
+        "r = reset all centers, d = delete current keyframe, "
+        "f/g = first/last frame, arrows or mouse wheel = move, "
         "+/- = adjust square by 25px, [/] = adjust square by 5px, "
-        "c = review centered crop, s = review current crop path, n = skip, p = play source, q = quit"
+        "c = review centered crop, s = review current crop path, n = skip, "
+        "x = discard for cropping, p = play source, q = quit"
     )
 
     for index, video_path in enumerate(pending_videos, start=1):
@@ -664,12 +782,18 @@ def main():
             ),
             output_size=args.output_size,
             display_width=args.display_width,
+            decode_display_width=args.decode_display_width,
+            preload_display_frames=not args.no_preload_display_frames,
         )
         decision, keyframes = selector.run()
 
         if decision == "quit":
             print("Stopped by user.")
             break
+        if decision == "discard":
+            destination = move_to_discarded(video_path, discarded_dir)
+            print(f"Discarded for cropping to {destination}")
+            continue
         if decision != "save":
             print("Skipped.")
             continue
