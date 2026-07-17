@@ -18,6 +18,51 @@ from useful_stuff.general_utils.utils import TimeSeries
 
 
 """
+min_max_normalization
+Normalizes every neural channel to [0, 1] using all non-channel dimensions.
+Optional reference data allows multiple arrays to share the same channel bounds.
+
+INPUT:
+    - neural_data: np.ndarray -> channels x time x stimuli neural responses
+    - reference_data: np.ndarray | None -> channels x samples data used to estimate
+        the per-channel minimum and maximum; defaults to neural_data
+
+OUTPUT:
+    - normalized_data: np.ndarray -> neural_data scaled independently per channel
+"""
+def min_max_normalization(neural_data, reference_data=None):
+    neural_data = np.asarray(neural_data)
+    if neural_data.ndim < 2:
+        raise ValueError("neural_data must have channels on axis 0 and at least one data axis")
+    # end if neural_data.ndim < 2
+
+    if reference_data is None:
+        reference_data = neural_data
+    else:
+        reference_data = np.asarray(reference_data)
+    # end if reference_data is None
+
+    if reference_data.ndim < 2 or reference_data.shape[0] != neural_data.shape[0]:
+        raise ValueError(
+            "reference_data must have the same number of channels as neural_data"
+        )
+    # end if reference_data.ndim < 2
+
+    reference_axes = tuple(range(1, reference_data.ndim))
+    bounds_shape = (neural_data.shape[0],) + (1,) * (neural_data.ndim - 1)
+    min_firing_rate = reference_data.min(axis=reference_axes).reshape(bounds_shape)
+    max_firing_rate = reference_data.max(axis=reference_axes).reshape(bounds_shape)
+    firing_rate_range = max_firing_rate - min_firing_rate
+
+    # Constant channels carry no representational information; map them to zero.
+    safe_range = np.where(firing_rate_range == 0, 1, firing_rate_range)
+    normalized_data = (neural_data - min_firing_rate) / safe_range
+    normalized_data = np.where(firing_rate_range == 0, 0, normalized_data)
+    return normalized_data
+# EOF
+
+
+"""
 decode_matlab_strings
 Decodes MATLAB strings stored in a v7.3 .mat file (HDF5 format) into Python strings.
 1) Iterates over HDF5 object references pointing to MATLAB char arrays
@@ -38,6 +83,69 @@ def decode_matlab_strings(h5file, ref_array):
         s = ''.join(chr(c) for c in chars.flatten()) # MATLAB chars are usually stored as Nx1 uint16
         strings.append(s)
     return strings
+# EOF
+
+
+"""
+load_natraster
+Loads MATLAB v7.3 natural-stimulus rasters and their corresponding condition names.
+
+INPUT:
+    - mat_path: str | Path -> path to the natraster MATLAB file
+
+OUTPUT:
+    - rasters: np.ndarray -> channels x time x stimuli raster array
+    - stimulus_names: list[str] -> condition name for every stimulus axis entry
+"""
+def load_natraster(mat_path):
+    with h5py.File(mat_path, "r") as f:
+        # MATLAB v7.3 dimensions are exposed in reverse order by h5py.
+        rasters = f["natraster"][:].transpose(2, 1, 0).astype(np.float32)
+        stimulus_names = decode_matlab_strings(f, f["uniqueImage"][:])
+    # end with h5py.File
+
+    if rasters.shape[2] != len(stimulus_names):
+        raise ValueError(
+            "The natraster stimulus axis does not match the number of uniqueImage names: "
+            f"{rasters.shape[2]} != {len(stimulus_names)}"
+        )
+    # end if rasters.shape[2]
+    return rasters, stimulus_names
+# EOF
+
+
+"""
+select_stimulus_rasters
+Selects one stimulus modality while preserving MATLAB's uniqueImage ordering.
+
+INPUT:
+    - rasters: np.ndarray -> channels x time x stimuli raster array
+    - stimulus_names: list[str] -> condition name for every stimulus axis entry
+    - stimulus_prefix: str -> filename prefix identifying the modality, e.g. img_ or vid_
+
+OUTPUT:
+    - selected_rasters: np.ndarray -> rasters restricted to the requested modality
+    - selected_names: list[str] -> selected names in the same order as selected_rasters
+"""
+def select_stimulus_rasters(rasters, stimulus_names, stimulus_prefix):
+    stimulus_indices = [
+        index for index, name in enumerate(stimulus_names)
+        if Path(name).stem.startswith(stimulus_prefix)
+    ]
+    if len(stimulus_indices) < 2:
+        raise ValueError(
+            f"Need at least two {stimulus_prefix!r} stimuli, found {len(stimulus_indices)}."
+        )
+    # end if len(stimulus_indices)
+
+    selected_names = [stimulus_names[index] for index in stimulus_indices]
+    if len(selected_names) != len(set(selected_names)):
+        raise ValueError(f"Duplicate {stimulus_prefix!r} names found in uniqueImage.")
+    # end if len(selected_names)
+
+    selected_rasters = rasters[:, :, stimulus_indices]
+    return selected_rasters, selected_names
+# EOF
 
 
 
@@ -245,5 +353,3 @@ class BrainAreas:
         return brain_area_response
     # EOF
 # EOC
-
-

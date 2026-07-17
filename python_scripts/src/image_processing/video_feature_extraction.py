@@ -1,7 +1,9 @@
 from pathlib import Path
+import re
 
 import cv2
 import h5py
+import numpy as np
 import torch
 from torchvision import transforms
 from transformers import AutoImageProcessor
@@ -11,6 +13,168 @@ DEFAULT_REPO_URLS = {
     "dino_v3_l": "facebook/dinov3-vitl16-pretrain-lvd1689m",
     "ijepa_vith14_1k": "facebook/ijepa_vith14_1k",
 }
+
+
+"""
+list_video_feature_files
+Lists layer-specific feature files in natural layer order.
+
+INPUT:
+    - output_dir: str | Path -> directory containing extracted HDF5 feature files
+    - model_name: str -> model prefix used during extraction
+    - dataset_name: str -> dataset label used during extraction
+    - pooling: str | None -> feature pooling used during extraction
+
+OUTPUT:
+    - feature_paths: list[Path] -> matching HDF5 files ordered by layer number
+"""
+def list_video_feature_files(
+        output_dir, model_name, dataset_name, pooling="mean",
+        ):
+    pooling_name = "none" if pooling is None else pooling
+    pattern = f"{model_name}_*_{dataset_name}_{pooling_name}pool.h5"
+    feature_paths = list(Path(output_dir).glob(pattern))
+
+    def natural_sort_key(path):
+        parts = re.split(r"(\d+)", path.name)
+        return [int(part) if part.isdigit() else part.lower() for part in parts]
+    # EOF
+
+    feature_paths.sort(key=natural_sort_key)
+    if not feature_paths:
+        raise FileNotFoundError(
+            f"No video feature files matching {pattern!r} in {output_dir}"
+        )
+    # end if not feature_paths
+    return feature_paths
+# EOF
+
+
+"""
+stimulus_key
+Returns a modality-independent stimulus identity from a stimulus filename.
+
+INPUT:
+    - stimulus_name: str | Path -> stimulus filename or HDF5 dataset name
+
+OUTPUT:
+    - key: str -> filename stem without an img_ or vid_ prefix
+"""
+def stimulus_key(stimulus_name):
+    key = Path(stimulus_name).stem
+    for prefix in ("img_", "vid_"):
+        if key.startswith(prefix):
+            return key[len(prefix):]
+        # end if key.startswith(prefix)
+    # end for prefix
+    return key
+# EOF
+
+
+"""
+match_feature_stimulus_names
+Matches neural stimulus names to HDF5 feature datasets by identity while preserving
+the neural/MATLAB order. Modality prefixes and filename extensions may differ.
+
+INPUT:
+    - feature_path: str | Path -> one layer-specific HDF5 feature file
+    - stimulus_names: list[str] -> neural stimulus names in the required order
+
+OUTPUT:
+    - feature_names: list[str] -> exact HDF5 dataset names in neural stimulus order
+"""
+def match_feature_stimulus_names(feature_path, stimulus_names):
+    with h5py.File(feature_path, "r") as feature_file:
+        dataset_names = [
+            name for name, value in feature_file.items()
+            if isinstance(value, h5py.Dataset)
+        ]
+    # end with h5py.File
+
+    names_by_key = {}
+    for dataset_name in dataset_names:
+        key = stimulus_key(dataset_name)
+        if key in names_by_key:
+            raise ValueError(
+                f"Feature file {Path(feature_path).name} contains multiple datasets "
+                f"for stimulus identity {key!r}."
+            )
+        # end if key in names_by_key
+        names_by_key[key] = dataset_name
+    # end for dataset_name
+
+    stimulus_keys = [stimulus_key(name) for name in stimulus_names]
+    if len(stimulus_keys) != len(set(stimulus_keys)):
+        raise ValueError("Neural stimulus names contain duplicate stimulus identities.")
+    # end if len(stimulus_keys)
+
+    missing_keys = [key for key in stimulus_keys if key not in names_by_key]
+    if missing_keys:
+        raise KeyError(
+            f"{Path(feature_path).name} is missing {len(missing_keys)} neural stimuli: "
+            f"{missing_keys[:5]}"
+        )
+    # end if missing_keys
+    return [names_by_key[key] for key in stimulus_keys]
+# EOF
+
+
+"""
+load_aligned_video_features
+Loads one layer in a requested stimulus order, either for all frames or one frame.
+
+INPUT:
+    - feature_path: str | Path -> layer-specific HDF5 feature file
+    - video_names: list[str] -> dataset names in the required stimulus order
+    - frame_index: int | None -> selected frame, or None to load every frame
+
+OUTPUT:
+    - features: np.ndarray -> features x stimuli for one frame, otherwise
+        features x frames x stimuli
+    - layer_name: str -> layer name stored in the HDF5 metadata
+    - source_fps: float -> decoded video frame rate shared by the stimuli
+"""
+def load_aligned_video_features(feature_path, video_names, frame_index=None):
+    with h5py.File(feature_path, "r") as feature_file:
+        missing_names = [name for name in video_names if name not in feature_file]
+        if missing_names:
+            raise KeyError(
+                f"{Path(feature_path).name} is missing {len(missing_names)} stimuli: "
+                f"{missing_names[:5]}"
+            )
+        # end if missing_names
+
+        layer_name = str(feature_file.attrs["layer_name"])
+        source_fps_values = {
+            float(feature_file[name].attrs["source_fps"]) for name in video_names
+        }
+        if len(source_fps_values) != 1:
+            raise ValueError(
+                f"Stimuli in {Path(feature_path).name} have different frame rates: "
+                f"{sorted(source_fps_values)}"
+            )
+        # end if len(source_fps_values)
+        source_fps = source_fps_values.pop()
+
+        if frame_index is None:
+            frame_counts = {feature_file[name].shape[0] for name in video_names}
+            if len(frame_counts) != 1:
+                raise ValueError(
+                    f"Stimuli in {Path(feature_path).name} have different frame counts: "
+                    f"{sorted(frame_counts)}"
+                )
+            # end if len(frame_counts)
+            features = np.stack(
+                [feature_file[name][:] for name in video_names], axis=0
+            ).transpose(2, 1, 0)
+        else:
+            features = np.stack(
+                [feature_file[name][frame_index] for name in video_names], axis=1
+            )
+        # end if frame_index is None
+    # end with h5py.File
+    return features, layer_name, source_fps
+# EOF
 
 
 """
