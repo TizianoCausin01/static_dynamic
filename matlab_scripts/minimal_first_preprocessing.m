@@ -1,10 +1,10 @@
 %% Soft-coded paths
-
+clear all; 
 BASE_DIR = "/Users/tizianocausin/livingstone_lab_local";
 data_dir = "/Users/tizianocausin/sd_local/data";
 data_formatted   = fullfile(BASE_DIR, 'Data-Formatted');
 data_neuropixel  = fullfile(BASE_DIR, 'Data-Neuropixels-Preprocessed');
-final_name = "baby1_260716";
+final_name = "baby1_260716to24";
 
 %% Parameters
 bkgwindow=5:35; % what's for?
@@ -15,8 +15,12 @@ raster_window  = [1 window_length_ms];
 chanpos_exp_name = 'baby1_260630';  % experiment used only for channel geometry (ask if needed to be always the same)
 
 exp_names = [
-
-    "baby1_260716",% parameter
+    'baby1_260716',
+    'baby1_260720',
+    'baby1_260721',
+    'baby1_260722',
+    'baby1_260723',
+    'baby1_260724'
 ];
 
 
@@ -44,7 +48,7 @@ for indx = 1:size(exp_names, 1)
     );
     mua = h5read(mua_path, '/mua_cont');
 
-    n_presentations = length(Trials); % how many stimuli were presented
+    n_presentations = length(Stimuli); % how many stimuli were presented
     for i = 1:n_presentations
             ii = ii + 1;
 
@@ -62,10 +66,13 @@ for indx = 1:size(exp_names, 1)
             allimages{ii} = Stimuli(i).filename; % all the images/videos in the order they were presented
             stim_xy(ii, :) = Stimuli(i).position; % position of the stimulus presentation (don't think it's needed)
     end
-
     clear mua %Stimuli Trials
 end
-
+%%
+disp("B1")
+disp(Session(1).image_root_dir)
+plot(mean(rasters, [1,3]))
+title("B1")
 %% Load channel positions and order channels by anatomical depth
 
 % Use a fixed/reference experiment for channel geometry.
@@ -116,7 +123,7 @@ end
 
 %% Save preprocessed outputs
 
-save(fullfile(data_dir, sprintf('%s_natraster.mat', exp_names(1))), ...
+save(fullfile(data_dir, sprintf('%s_natraster.mat', final_name)), ...
     'natraster', ...
     'image_resp', ...
     'uniqueImage', ...
