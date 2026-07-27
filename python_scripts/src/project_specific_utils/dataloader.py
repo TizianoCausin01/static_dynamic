@@ -18,6 +18,122 @@ from useful_stuff.general_utils.utils import TimeSeries
 
 
 """
+match_timed_static_movie_rasters
+Align standard-image, timed-image, and movie rasters by stimulus identity.
+
+INPUT:
+    - image_rasters: np.ndarray -> channels x time x image-session stimuli.
+    - image_names: list[str] -> image-session stimulus names.
+    - movie_rasters: np.ndarray -> channels x time x movie-session stimuli.
+    - movie_names: list[str] -> movie-session stimulus names.
+    - image_prefix: str -> standard-image filename prefix.
+    - image_2000ms_prefix: str -> 2000 ms image filename prefix.
+    - image_2250ms_prefix: str -> 2250 ms image filename prefix.
+    - movie_prefix: str -> movie filename prefix.
+
+OUTPUT:
+    - aligned_image_rasters: np.ndarray -> aligned standard-image rasters.
+    - aligned_movie_rasters: np.ndarray -> aligned movie rasters.
+    - aligned_image_2000ms_rasters: np.ndarray -> aligned 2000 ms rasters.
+    - aligned_image_2250ms_rasters: np.ndarray -> aligned 2250 ms rasters.
+    - shared_stimuli: list[str] -> identities shared by all four conditions.
+    - aligned_names: dict[str, list[str]] -> retained names for every condition.
+"""
+def match_timed_static_movie_rasters(
+        image_rasters, image_names, movie_rasters, movie_names,
+        image_prefix="img_", image_2000ms_prefix="img_2000ms_",
+        image_2250ms_prefix="img_2250ms_", movie_prefix="vid_",
+        ):
+    image_indices_by_condition = {
+        "image": {},
+        "image_2000ms": {},
+        "image_2250ms": {},
+    }
+
+    # Assign each image-session stimulus to one mutually exclusive condition.
+    for index, name in enumerate(image_names):
+        stimulus_stem = Path(name).stem
+        if stimulus_stem.startswith(image_2000ms_prefix):
+            condition = "image_2000ms"
+            identity = stimulus_stem[len(image_2000ms_prefix):]
+        elif stimulus_stem.startswith(image_2250ms_prefix):
+            condition = "image_2250ms"
+            identity = stimulus_stem[len(image_2250ms_prefix):]
+        elif stimulus_stem.startswith(image_prefix):
+            condition = "image"
+            identity = stimulus_stem[len(image_prefix):]
+        else:
+            continue
+        # end if stimulus_stem.startswith
+
+        condition_indices = image_indices_by_condition[condition]
+        if identity in condition_indices:
+            raise ValueError(
+                f"Duplicate {condition} stimulus identity: {identity!r}."
+            )
+        # end if identity in condition_indices
+        condition_indices[identity] = index
+    # end for index, name
+
+    movie_index_by_identity = {}
+    for index, name in enumerate(movie_names):
+        stimulus_stem = Path(name).stem
+        if not stimulus_stem.startswith(movie_prefix):
+            continue
+        # end if not stimulus_stem.startswith
+
+        identity = stimulus_stem[len(movie_prefix):]
+        if identity in movie_index_by_identity:
+            raise ValueError(f"Duplicate movie stimulus identity: {identity!r}.")
+        # end if identity in movie_index_by_identity
+        movie_index_by_identity[identity] = index
+    # end for index, name
+
+    standard_indices = image_indices_by_condition["image"]
+    image_2000ms_indices = image_indices_by_condition["image_2000ms"]
+    image_2250ms_indices = image_indices_by_condition["image_2250ms"]
+    shared_stimuli = [
+        identity for identity in standard_indices
+        if identity in image_2000ms_indices
+        and identity in image_2250ms_indices
+        and identity in movie_index_by_identity
+    ]
+    if len(shared_stimuli) < 2:
+        raise ValueError("Need at least two stimuli shared by all four conditions.")
+    # end if len(shared_stimuli) < 2
+
+    orders = {
+        "image": [standard_indices[key] for key in shared_stimuli],
+        "movie": [movie_index_by_identity[key] for key in shared_stimuli],
+        "image_2000ms": [
+            image_2000ms_indices[key] for key in shared_stimuli
+        ],
+        "image_2250ms": [
+            image_2250ms_indices[key] for key in shared_stimuli
+        ],
+    }
+    aligned_names = {
+        "image": [image_names[index] for index in orders["image"]],
+        "movie": [movie_names[index] for index in orders["movie"]],
+        "image_2000ms": [
+            image_names[index] for index in orders["image_2000ms"]
+        ],
+        "image_2250ms": [
+            image_names[index] for index in orders["image_2250ms"]
+        ],
+    }
+    return (
+        image_rasters[:, :, orders["image"]],
+        movie_rasters[:, :, orders["movie"]],
+        image_rasters[:, :, orders["image_2000ms"]],
+        image_rasters[:, :, orders["image_2250ms"]],
+        shared_stimuli,
+        aligned_names,
+    )
+# EOF
+
+
+"""
 min_max_normalization
 Normalizes every neural channel to [0, 1] using all non-channel dimensions.
 Optional reference data allows multiple arrays to share the same channel bounds.
