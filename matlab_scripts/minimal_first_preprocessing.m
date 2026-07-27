@@ -9,23 +9,27 @@ final_name = "baby1_260716to24";
 %% Parameters
 bkgwindow=5:35; % what's for?
 evkwindow=90:470; % what's for?
-window_length_ms = 3500; % parameter
+window_length_ms = 100; % parameter
 raster_window  = [1 window_length_ms];
 
 chanpos_exp_name = 'baby1_260630';  % experiment used only for channel geometry (ask if needed to be always the same)
 
 exp_names = [
-    'baby1_260716',
-    'baby1_260720',
-    'baby1_260721',
-    'baby1_260722',
-    'baby1_260723',
-    'baby1_260724'
+    % 'baby1_260716',
+    'baby1_260718',
+    % 'baby1_260720',
+    % 'baby1_260721',
+    % 'baby1_260722',
+    % 'baby1_260723',
+    % 'baby1_260724'
+    'baby1_260725', 
+    'baby1_260726'
 ];
 
 
 %% Load MUA and extract stimulus-aligned rasters
 ii = 0; % what's for?
+allimages = {};
 for indx = 1:size(exp_names, 1)
 
     curr_exp = strtrim(exp_names(indx, :)); % strtrim just removes leading and trailing whitespaces
@@ -56,7 +60,7 @@ for indx = 1:size(exp_names, 1)
             window = round(Stimuli(i).start_time + raster_window(1)); % takes the window start and end, rounds up to ms and crops the mua there
             % WARNING: IT IS NOT FILTERING FOR TRIAL SUCCESS
             % Extract channels x time window around this stimulus.
-            rasters(:, :, i) = mua(:, window:window + window_length_ms - 1);
+            rasters(:, :, ii) = mua(:, window:window + window_length_ms - 1);
 
             % Baseline-subtract each channel using the first 40 time bins.
             baseline = nanmean(rasters(:, 1:40, ii), 2);
@@ -123,13 +127,41 @@ end
 
 %% Save preprocessed outputs
 
-save(fullfile(data_dir, sprintf('%s_natraster.mat', final_name)), ...
-    'natraster', ...
-    'image_resp', ...
-    'uniqueImage', ...
-    'imIndex', ...
-    'allimages', ...
-    'stim_xy', ...
-    'channel_depth_sorted', ...
-    'I', ...
-    '-v7.3');
+% save(fullfile(data_dir, sprintf('%s_natraster.mat', final_name)), ...
+%     'natraster', ...
+%     'image_resp', ...
+%     'uniqueImage', ...
+%     'imIndex', ...
+%     'allimages', ...
+%     'stim_xy', ...
+%     'channel_depth_sorted', ...
+%     'I', ...
+%     '-v7.3');
+%%
+  repetitions_per_image = accumarray( ...                                                                                                       
+      imIndex(:), 1, [numel(uniqueImage), 1]);                                                                                                  
+                                                                                                                                                
+  min_repetitions = min(repetitions_per_image);                                                                                                 
+  max_repetitions = max(repetitions_per_image);                                                                                                 
+
+  images_with_min_repetitions = ...
+      uniqueImage(repetitions_per_image == min_repetitions);
+
+  images_with_max_repetitions = ...
+      uniqueImage(repetitions_per_image == max_repetitions);
+
+  fprintf('Minimum repetitions per image: %d\n', min_repetitions);
+  disp(images_with_min_repetitions)
+
+  fprintf('Maximum repetitions per image: %d\n', max_repetitions);
+  disp(images_with_max_repetitions)
+
+  % Optional: display all images and their repetition counts.
+  repetition_table = table( ...
+      uniqueImage(:), repetitions_per_image, ...
+      'VariableNames', {'image', 'n_repetitions'});
+
+  repetition_table = sortrows( ...
+      repetition_table, 'n_repetitions', 'descend');
+
+  disp(repetition_table)

@@ -8,18 +8,19 @@ cfg.BASE_DIR = "/Users/tizianocausin/livingstone_lab_local";
 cfg.data_dir = "/Users/tizianocausin/sd_local/data";
 cfg.data_formatted   = fullfile(cfg.BASE_DIR, 'Data-Formatted');
 
-cfg.final_name = 'red_20260720to24'; %to22';
+cfg.final_name = 'red_20260720to24' %'red_20260720to24'; %to22';
 cfg.exp_names = {
     'red_20260720',
     'red_20260721',
     'red_20260722',
     'red_20260723',
-    'red_20260724'
+    'red_20260724',
+    % 'red_20260726'
 };
 
 % Keep the existing Plexon baseline convention while matching the temporal
 % window used by the Neuropixels preprocessing script.
-cfg.window_length_ms = 3500;
+cfg.window_length_ms = 1000;
 cfg.raster_window = [1 cfg.window_length_ms];
 cfg.baseline_window = 1:50;
 cfg.evoked_window = 90:470;
@@ -129,18 +130,46 @@ end % end for stimulus_number
 
 
 %% Save preprocessed outputs
+% 
+% % Save the shared natraster fields plus Plexon unit identifiers. There is no
+% % channel-depth ordering for these sorted-unit recordings.
+% save(fullfile(cfg.data_dir, sprintf('%s_natraster.mat', cfg.final_name)), ...
+%     'natraster', ...
+%     'image_resp', ...
+%     'uniqueImage', ...
+%     'imIndex', ...
+%     'allimages', ...
+%     'stim_xy', ...
+%     'unit_names', ...
+%     'cfg', ...
+%     '-v7.3');
+% 
+% % EOF
+%%
+  repetitions_per_image = accumarray( ...                                                                                                       
+      imIndex(:), 1, [numel(uniqueImage), 1]);                                                                                                  
+                                                                                                                                                
+  min_repetitions = min(repetitions_per_image);                                                                                                 
+  max_repetitions = max(repetitions_per_image);                                                                                                 
 
-% Save the shared natraster fields plus Plexon unit identifiers. There is no
-% channel-depth ordering for these sorted-unit recordings.
-save(fullfile(cfg.data_dir, sprintf('%s_natraster.mat', cfg.final_name)), ...
-    'natraster', ...
-    'image_resp', ...
-    'uniqueImage', ...
-    'imIndex', ...
-    'allimages', ...
-    'stim_xy', ...
-    'unit_names', ...
-    'cfg', ...
-    '-v7.3');
+  images_with_min_repetitions = ...
+      uniqueImage(repetitions_per_image == min_repetitions);
 
-% EOF
+  images_with_max_repetitions = ...
+      uniqueImage(repetitions_per_image == max_repetitions);
+
+  fprintf('Minimum repetitions per image: %d\n', min_repetitions);
+  disp(images_with_min_repetitions)
+
+  fprintf('Maximum repetitions per image: %d\n', max_repetitions);
+  disp(images_with_max_repetitions)
+
+  % Optional: display all images and their repetition counts.
+  repetition_table = table( ...
+      uniqueImage(:), repetitions_per_image, ...
+      'VariableNames', {'image', 'n_repetitions'});
+
+  repetition_table = sortrows( ...
+      repetition_table, 'n_repetitions', 'descend');
+
+  disp(repetition_table)
