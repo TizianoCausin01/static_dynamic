@@ -27,6 +27,9 @@ __all__ = [
     'compute_cross_temporal_pc_rotation', 'compute_drsa_autocorrelation',
     'compute_manifold_dynamics', 'compute_pc_subspaces',
     'population_response_scores', 'select_manifold_subsets',
+    'analysis_timecourses', 'layer_depth_temporal_score',
+    'load_model_layer_rsa', 'rdm_noise_ceiling', 'summarize_model_analysis',
+    'timecourse_latency',
     'build_neural_model_rsa_filename', 'compute_layer_neural_model_rsa',
     'compute_neural_rdm_timeseries', 'filename_token', 'normalize_rsa_metric',
     'save_layer_neural_model_rsa',
@@ -79,4 +82,9 @@ from .neural_model_rsa import (
     build_neural_model_rsa_filename, compute_layer_neural_model_rsa,
     compute_neural_rdm_timeseries, filename_token, normalize_rsa_metric,
     save_layer_neural_model_rsa,
+)
+from .model_hierarchy_latency import (
+    analysis_timecourses, layer_depth_temporal_score,
+    load_model_layer_rsa, rdm_noise_ceiling, summarize_model_analysis,
+    timecourse_latency,
 )
