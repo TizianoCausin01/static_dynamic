@@ -1,5 +1,9 @@
 __all__ = [
+    "MODEL_ZOO",
+    "ModelSpec",
+    "blockwise_layers",
     "get_images_from_batch",
+    "get_model_spec",
     "ipca_imagenet_wrapper",
     "save_dataset_pca_srp",
     "save_dataset_srp",
@@ -11,6 +15,7 @@ __all__ = [
     "srp_pca_dataset_wrapper",
     "srp_pca_imagenet_wrapper",
     "srp_pca_project_dataset_wrapper",
+    "stagewise_layers",
 ]
 
 from .feature_extraction import (
@@ -26,4 +31,11 @@ from .feature_extraction import (
     srp_pca_dataset_wrapper,
     srp_pca_imagenet_wrapper,
     srp_pca_project_dataset_wrapper,
+)
+from .model_zoo import (
+    MODEL_ZOO,
+    ModelSpec,
+    blockwise_layers,
+    get_model_spec,
+    stagewise_layers,
 )

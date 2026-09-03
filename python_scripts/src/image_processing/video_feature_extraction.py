@@ -34,7 +34,21 @@ def list_video_feature_files(
         ):
     pooling_name = "none" if pooling is None else pooling
     pattern = f"{model_name}_*_{dataset_name}_{pooling_name}pool.h5"
-    feature_paths = list(Path(output_dir).glob(pattern))
+    # The glob also matches longer model names that extend this one
+    # ("videomae_base" would match "videomae_base_ssv2" files), so the stored
+    # model name decides which files really belong to this model.
+    feature_paths = []
+    for candidate_path in Path(output_dir).glob(pattern):
+        # locking=False so a file another model's extraction still holds open
+        # can be identified instead of raising; only the creation-time
+        # model_name attribute is read here.
+        with h5py.File(candidate_path, "r", locking=False) as feature_file:
+            stored_model_name = feature_file.attrs.get("model_name")
+        # end with h5py.File
+        if stored_model_name is None or str(stored_model_name) == model_name:
+            feature_paths.append(candidate_path)
+        # end if the file belongs to this model
+    # end for candidate_path
 
     def natural_sort_key(path):
         parts = re.split(r"(\d+)", path.name)
@@ -239,7 +253,17 @@ OUTPUT:
 def build_frame_preprocessor(pkg, model_source, img_size):
     if pkg == "hf":
         preprocessor = AutoImageProcessor.from_pretrained(model_source)
-        preprocessor.size = {"height": img_size, "width": img_size}
+        # Processors such as ConvNeXt resize the shortest edge and then crop,
+        # so the requested size must be written in the schema they expect.
+        current_size = getattr(preprocessor, "size", None)
+        if isinstance(current_size, dict) and "shortest_edge" in current_size:
+            preprocessor.size = {"shortest_edge": img_size}
+        else:
+            preprocessor.size = {"height": img_size, "width": img_size}
+        # end if shortest-edge processor
+        if isinstance(getattr(preprocessor, "crop_size", None), dict):
+            preprocessor.crop_size = {"height": img_size, "width": img_size}
+        # end if the processor center-crops after resizing
         return preprocessor
 
     return transforms.Compose([
@@ -283,27 +307,49 @@ INPUT:
     - pkg: str -> model package used by vidANN
     - model_source: str -> Hugging Face repository or model identifier
     - img_size: int -> square model input size
+    - mean: sequence[float] | None -> channel means for the torchvision path
+    - std: sequence[float] | None -> channel standard deviations for that path
 
 OUTPUT:
     - preprocessor: AutoVideoProcessor | torchvision.transforms.Compose ->
         video-frame preprocessor
 """
-def build_video_preprocessor(pkg, model_source, img_size):
+def build_video_preprocessor(
+        pkg, model_source, img_size, mean=None, std=None,
+        ):
     if pkg == "hf":
-        return AutoVideoProcessor.from_pretrained(
-            model_source, crop_size=img_size,
-        )
+        # Only recent video models ship a dedicated video processor; older ones
+        # (VideoMAE, TimeSformer) expose an image processor that already accepts
+        # a list of frames and returns a five-dimensional video tensor.
+        try:
+            return AutoVideoProcessor.from_pretrained(
+                model_source, crop_size=img_size,
+            )
+        except (ValueError, OSError, EnvironmentError):
+            preprocessor = AutoImageProcessor.from_pretrained(model_source)
+        # end try
+        current_size = getattr(preprocessor, "size", None)
+        if isinstance(current_size, dict) and "shortest_edge" in current_size:
+            preprocessor.size = {"shortest_edge": img_size}
+        elif isinstance(current_size, dict):
+            preprocessor.size = {"height": img_size, "width": img_size}
+        # end if shortest-edge processor
+        if isinstance(getattr(preprocessor, "crop_size", None), dict):
+            preprocessor.crop_size = {"height": img_size, "width": img_size}
+        # end if the processor center-crops after resizing
+        return preprocessor
     # end if Hugging Face
 
+    # Kinetics-trained video CNNs use their own statistics, so both moments
+    # default to ImageNet only when the caller does not supply them.
+    mean = [0.485, 0.456, 0.406] if mean is None else list(mean)
+    std = [0.229, 0.224, 0.225] if std is None else list(std)
     return transforms.Compose([
         transforms.ToPILImage(),
         transforms.Resize(img_size),
         transforms.CenterCrop(img_size),
         transforms.ToTensor(),
-        transforms.Normalize(
-            mean=[0.485, 0.456, 0.406],
-            std=[0.229, 0.224, 0.225],
-        ),
+        transforms.Normalize(mean=mean, std=std),
     ])
 # EOF
 
