@@ -17,3 +17,6 @@ __pycache__/
 literature/
 PrimateFace/
 DeepGaze/
+
+results/
+tmp/
