@@ -27,6 +27,9 @@ __all__ = [
     'compute_cross_temporal_pc_rotation', 'compute_drsa_autocorrelation',
     'compute_manifold_dynamics', 'compute_pc_subspaces',
     'population_response_scores', 'select_manifold_subsets',
+    'build_neural_model_rsa_filename', 'compute_layer_neural_model_rsa',
+    'compute_neural_rdm_timeseries', 'filename_token', 'normalize_rsa_metric',
+    'save_layer_neural_model_rsa',
 ]
 
 from .channel_reliability import (
@@ -71,4 +74,9 @@ from .manifold_dynamics import (
     compute_cross_temporal_pc_rotation, compute_drsa_autocorrelation,
     compute_manifold_dynamics, compute_pc_subspaces,
     population_response_scores, select_manifold_subsets,
+)
+from .neural_model_rsa import (
+    build_neural_model_rsa_filename, compute_layer_neural_model_rsa,
+    compute_neural_rdm_timeseries, filename_token, normalize_rsa_metric,
+    save_layer_neural_model_rsa,
 )
