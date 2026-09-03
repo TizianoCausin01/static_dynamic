@@ -1,4 +1,5 @@
 import argparse
+from collections import Counter
 from dataclasses import asdict, dataclass
 import json
 import os
@@ -32,6 +33,7 @@ from project_specific_utils import (
     compute_rdm_timeseries,
     cross_temporal_similarity,
     load_raster,
+    load_reliable_channels,
     rowwise_similarity,
 )
 from useful_stuff.general_utils import TimeSeries
@@ -47,6 +49,9 @@ class Cfg:
 
     # MATLAB channel numbers are one-based and both endpoints are inclusive.
     good_channels: tuple[int, int] | None = (101, 109)
+    # Optional reliability list intersected with the good_channels range.
+    reliable_channels_config: str | None = None
+    reliable_channels_key: str | None = None
     static_crop_ms: float = 1000
     dynamic_crop_ms: float | None = None
     source_fs: float = 1000
@@ -54,6 +59,8 @@ class Cfg:
     rdm_metric: str = "cosine_cnt"
     rsa_metric: str = "correlation"
     n_split_repeats: int = 10
+    # Stimuli presented fewer times than this cannot be split in half.
+    min_repetitions: int = 2
     random_seed: int = 0
     static_reference_window_ms: tuple[float, float] = (0, 1000)
     figure_dpi: int = 200
@@ -88,6 +95,20 @@ def parse_args() -> Cfg:
         metavar=("FIRST", "LAST"),
     )
     parser.add_argument("--all_channels", action="store_true")
+    parser.add_argument(
+        "--reliable_channels_config",
+        help=(
+            "YAML reliability file. Its non-contiguous channel list is "
+            "intersected with --good_channels when both are supplied."
+        ),
+    )
+    parser.add_argument(
+        "--reliable_channels_key",
+        help=(
+            "Dataset key in the reliability YAML; defaults to the static "
+            "session name."
+        ),
+    )
     parser.add_argument("--static_crop_ms", type=float, default=Cfg.static_crop_ms)
     parser.add_argument("--dynamic_crop_ms", type=float)
     parser.add_argument("--source_fs", type=float, default=Cfg.source_fs)
@@ -99,6 +120,10 @@ def parse_args() -> Cfg:
         default=Cfg.rsa_metric,
     )
     parser.add_argument("--n_split_repeats", type=int, default=Cfg.n_split_repeats)
+    parser.add_argument(
+        "--min_repetitions", type=int, default=Cfg.min_repetitions,
+        help="Drop stimuli with fewer repetitions than this.",
+    )
     parser.add_argument("--random_seed", type=int, default=Cfg.random_seed)
     parser.add_argument(
         "--static_reference_window_ms",
@@ -448,6 +473,32 @@ def main() -> None:
         first_channel, last_channel = cfg.good_channels
         channel_slice = slice(first_channel - 1, last_channel)
     # end if cfg.good_channels
+    selected_channel_numbers = None
+    if cfg.reliable_channels_config is not None:
+        # The reliability list is one-based and gets intersected with the
+        # optional contiguous range, matching load_natraster's behaviour.
+        reliable_channels = load_reliable_channels(
+            cfg.reliable_channels_config,
+            cfg.reliable_channels_key or cfg.static_exp_name,
+        )
+        if cfg.good_channels is None:
+            selected_channel_numbers = np.asarray(reliable_channels)
+        else:
+            selected_channel_numbers = np.asarray([
+                channel for channel in reliable_channels
+                if first_channel <= channel <= last_channel
+            ])
+        # end if cfg.good_channels is None
+        if selected_channel_numbers.size == 0:
+            raise ValueError(
+                "No reliable channels fall inside the selected range."
+            )
+        # end if empty selection
+        channel_slice = selected_channel_numbers - 1
+        print(
+            f"Reliable channels retained: {selected_channel_numbers.tolist()}"
+        )
+    # end if cfg.reliable_channels_config is not None
     static_end_sample = int(round(cfg.static_crop_ms * cfg.source_fs / 1000))
     dynamic_end_sample = None
     if cfg.dynamic_crop_ms is not None:
@@ -468,6 +519,26 @@ def main() -> None:
     static_identity_set = {identity for identity in static_identities if identity is not None}
     dynamic_identity_set = {identity for identity in dynamic_identities if identity is not None}
     shared_stimuli = sorted(static_identity_set & dynamic_identity_set)
+    # Splitting the repetitions in half needs at least two of them, so stimuli
+    # presented once in either condition cannot enter the reliability estimate.
+    static_counts = Counter(static_identities)
+    dynamic_counts = Counter(dynamic_identities)
+    under_sampled = [
+        identity for identity in shared_stimuli
+        if min(static_counts[identity], dynamic_counts[identity])
+        < cfg.min_repetitions
+    ]
+    if under_sampled:
+        print(
+            f"Dropping {len(under_sampled)} of {len(shared_stimuli)} stimuli "
+            f"with fewer than {cfg.min_repetitions} repetitions in one "
+            f"condition: {under_sampled[:5]}"
+        )
+        shared_stimuli = [
+            identity for identity in shared_stimuli
+            if identity not in set(under_sampled)
+        ]
+    # end if under_sampled
     if len(shared_stimuli) < 3:
         raise ValueError("Need at least three stimuli shared by both conditions.")
     # end if len(shared_stimuli)
@@ -529,6 +600,9 @@ def main() -> None:
         "dynamic_times_ms": dynamic_times_ms,
         "shared_stimuli": np.asarray(shared_stimuli),
     }
+    if selected_channel_numbers is not None:
+        results["selected_channel_numbers"] = selected_channel_numbers
+    # end if an explicit channel list was used
     summary_path = output_dir / "split_half_and_static_explanation.png"
     scatter_path = output_dir / "static_explanation_vs_consistency.png"
     data_path = output_dir / "split_half_static_dynamic_rsa.npz"
