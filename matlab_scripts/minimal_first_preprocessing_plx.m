@@ -8,20 +8,19 @@ cfg.BASE_DIR = "/Users/tizianocausin/livingstone_lab_local";
 cfg.data_dir = "/Users/tizianocausin/sd_local/data";
 cfg.data_formatted   = fullfile(cfg.BASE_DIR, 'Data-Formatted');
 
-cfg.final_name = 'red_20260726to27' %'red_20260720to24'; %to22';
+cfg.final_name = 'paul_20260831' %'red_20260720to24'; %to22';
 cfg.exp_names = {
     % 'red_20260720',
     % 'red_20260721',
     % 'red_20260722',
     % 'red_20260723',
     % 'red_20260724',
-    'red_20260726',
-    'red_20260727'
+    'paul_20260831',
 };
 
 % Keep the existing Plexon baseline convention while matching the temporal
 % window used by the Neuropixels preprocessing script.
-cfg.window_length_ms = 1000;
+cfg.window_length_ms = 3500;
 cfg.raster_window = [1 cfg.window_length_ms];
 cfg.baseline_window = 1:50;
 cfg.evoked_window = 90:470;

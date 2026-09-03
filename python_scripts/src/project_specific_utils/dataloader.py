@@ -527,20 +527,25 @@ def load_binned_raster(
 """
 select_stimulus_rasters
 Selects one stimulus modality while preserving MATLAB's uniqueImage ordering.
+Optional exclusions distinguish a broad prefix such as img_ from timed controls.
 
 INPUT:
     - rasters: np.ndarray -> channels x time x stimuli raster array
     - stimulus_names: list[str] -> condition name for every stimulus axis entry
     - stimulus_prefix: str -> filename prefix identifying the modality, e.g. img_ or vid_
+    - excluded_prefixes: tuple[str, ...] -> more specific conditions to omit
 
 OUTPUT:
     - selected_rasters: np.ndarray -> rasters restricted to the requested modality
     - selected_names: list[str] -> selected names in the same order as selected_rasters
 """
-def select_stimulus_rasters(rasters, stimulus_names, stimulus_prefix):
+def select_stimulus_rasters(
+        rasters, stimulus_names, stimulus_prefix, excluded_prefixes=(),
+        ):
     stimulus_indices = [
         index for index, name in enumerate(stimulus_names)
         if Path(name).stem.startswith(stimulus_prefix)
+        and not Path(name).stem.startswith(tuple(excluded_prefixes))
     ]
     if len(stimulus_indices) < 2:
         raise ValueError(
