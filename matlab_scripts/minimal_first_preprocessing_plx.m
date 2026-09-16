@@ -8,14 +8,14 @@ cfg.BASE_DIR = "/Users/tizianocausin/livingstone_lab_local";
 cfg.data_dir = "/Users/tizianocausin/sd_local/data";
 cfg.data_formatted   = fullfile(cfg.BASE_DIR, 'Data-Formatted');
 
-cfg.final_name = 'paul_20260831' %'red_20260720to24'; %to22';
+cfg.final_name = 'paul_20260915' %'red_20260720to24'; %to22';
 cfg.exp_names = {
     % 'red_20260720',
     % 'red_20260721',
     % 'red_20260722',
     % 'red_20260723',
     % 'red_20260724',
-    'paul_20260831',
+    'paul_20260915',
 };
 
 % Keep the existing Plexon baseline convention while matching the temporal
