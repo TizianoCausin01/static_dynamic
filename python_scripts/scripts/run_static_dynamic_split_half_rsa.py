@@ -30,6 +30,7 @@ sys.path.extend([paths["src_path"], paths["useful_stuff_path"]])
 from project_specific_utils import (
     average_presentations,
     average_repetition_halves,
+    channel_selection_name,
     compute_rdm_timeseries,
     cross_temporal_similarity,
     load_raster,
@@ -458,13 +459,17 @@ def main() -> None:
     dynamic_path = Path(
         cfg.dynamic_path or data_dir / f"{cfg.dynamic_exp_name}_raster_vid.mat"
     ).expanduser()
-    output_dir = Path(
+    output_root = Path(
         cfg.output_dir
         or PROJECT_ROOT
         / "results"
         / "static_dynamic_split_half_rsa"
         / f"{cfg.dynamic_exp_name}_vs_{cfg.static_exp_name}"
     ).expanduser()
+    # One subfolder per channel selection, as in run_static_dynamic_all_frame_timings.py.
+    output_dir = output_root / channel_selection_name(
+        cfg.good_channels, cfg.reliable_channels_config is not None,
+    )
     output_dir.mkdir(parents=True, exist_ok=True)
 
     if cfg.good_channels is None:

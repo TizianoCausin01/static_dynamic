@@ -6,7 +6,7 @@ __all__ = [
     'load_binned_raster', 'load_raster_presentation_names',
     'match_timed_static_movie_rasters',
     'select_stimulus_rasters',
-    'compute_channel_selectivity_reliability',
+    'channel_selection_name', 'compute_channel_selectivity_reliability',
     'last_frame_presentation_indices', 'load_reliable_channels',
     'rowwise_pearson_correlation', 'save_reliable_channels',
     'summarize_channel_reliability',
@@ -36,7 +36,7 @@ __all__ = [
 ]
 
 from .channel_reliability import (
-    compute_channel_selectivity_reliability,
+    channel_selection_name, compute_channel_selectivity_reliability,
     last_frame_presentation_indices, load_reliable_channels,
     rowwise_pearson_correlation, save_reliable_channels,
     summarize_channel_reliability,

@@ -339,3 +339,45 @@ def load_reliable_channels(
     # end if duplicate channel number
     return sorted(reliable_channels)
 # EOF
+
+
+"""
+channel_selection_name
+Build the result-subfolder name describing a channel selection, using the same
+convention as run_static_dynamic_all_frame_timings.py (e.g.
+reliable_channels_84to186, channels_101to109, all_channels).
+
+INPUT:
+    - good_channels: tuple[int, int] | None -> inclusive one-based channel range
+    - use_reliable_channels: bool -> whether the reliability YAML list was applied
+    - top_k: int | None -> number of top-ranked channels retained
+
+OUTPUT:
+    - selection_name: str -> channel-selection folder name
+"""
+def channel_selection_name(
+        good_channels: tuple[int, int] | None,
+        use_reliable_channels: bool,
+        top_k: int | None = None,
+        ) -> str:
+    if use_reliable_channels:
+        # Reliable channels are named by the range and top-k filters applied on top.
+        selection_name = "reliable_channels"
+        if good_channels is not None:
+            first_channel, last_channel = good_channels
+            selection_name += f"_{first_channel}to{last_channel}"
+        # end if good_channels
+        if top_k is not None:
+            selection_name += f"_top_{top_k}"
+        # end if top_k
+        return selection_name
+    # end if use_reliable_channels
+    if good_channels is not None:
+        first_channel, last_channel = good_channels
+        return f"channels_{first_channel}to{last_channel}"
+    # end if good_channels
+    if top_k is not None:
+        return f"top_{top_k}"
+    # end if top_k
+    return "all_channels"
+# EOF
