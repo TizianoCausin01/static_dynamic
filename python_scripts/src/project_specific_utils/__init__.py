@@ -33,6 +33,9 @@ __all__ = [
     'build_neural_model_rsa_filename', 'compute_layer_neural_model_rsa',
     'compute_neural_rdm_timeseries', 'filename_token', 'normalize_rsa_metric',
     'save_layer_neural_model_rsa',
+    'latency_profile_smoothness', 'permute_rdm_entries',
+    'permuted_static_rsa', 'prepare_static_neural_rdms',
+    'static_model_rdms_by_layer',
 ]
 
 from .channel_reliability import (
@@ -82,6 +85,10 @@ from .neural_model_rsa import (
     build_neural_model_rsa_filename, compute_layer_neural_model_rsa,
     compute_neural_rdm_timeseries, filename_token, normalize_rsa_metric,
     save_layer_neural_model_rsa,
+)
+from .rdm_permutation_control import (
+    latency_profile_smoothness, permute_rdm_entries, permuted_static_rsa,
+    prepare_static_neural_rdms, static_model_rdms_by_layer,
 )
 from .model_hierarchy_latency import (
     analysis_timecourses, layer_depth_temporal_score,
