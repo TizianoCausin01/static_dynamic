@@ -2,21 +2,30 @@ __all__ = [
     "MODEL_ZOO",
     "ModelSpec",
     "blockwise_layers",
+    "build_frame_buffer",
+    "cast_pca_float32",
+    "group_layers_by_bytes",
+    "fit_frame_pca_model",
     "get_images_from_batch",
     "get_model_spec",
     "ipca_imagenet_wrapper",
+    "load_frame_pcas",
+    "pca_projection",
     "save_dataset_pca_srp",
     "save_dataset_srp",
+    "save_frame_pca",
     "save_imagenet_val_ipca",
     "save_imagenet_val_pca_srp",
     "save_imagenet_val_srp",
     "save_srp_pca_projected_features",
+    "selected_frames_per_video",
     "srp_pca_backproject_imagenet_wrapper",
     "srp_pca_dataset_wrapper",
     "srp_pca_imagenet_wrapper",
     "srp_pca_project_dataset_wrapper",
     "stagewise_layers",
 ]
+
 
 from .feature_extraction import (
     get_images_from_batch,
@@ -31,6 +40,16 @@ from .feature_extraction import (
     srp_pca_dataset_wrapper,
     srp_pca_imagenet_wrapper,
     srp_pca_project_dataset_wrapper,
+)
+from .frame_pca import (
+    build_frame_buffer,
+    cast_pca_float32,
+    group_layers_by_bytes,
+    fit_frame_pca_model,
+    load_frame_pcas,
+    pca_projection,
+    save_frame_pca,
+    selected_frames_per_video,
 )
 from .model_zoo import (
     MODEL_ZOO,

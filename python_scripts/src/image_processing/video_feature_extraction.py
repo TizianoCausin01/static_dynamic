@@ -8,6 +8,8 @@ import torch
 from torchvision import transforms
 from transformers import AutoImageProcessor, AutoVideoProcessor
 
+from .model_zoo import MODEL_ZOO
+
 
 DEFAULT_REPO_URLS = {
     "dino_v3_l": "facebook/dinov3-vitl16-pretrain-lvd1689m",
@@ -18,7 +20,7 @@ DEFAULT_REPO_URLS = {
 
 """
 list_video_feature_files
-Lists layer-specific feature files in natural layer order.
+Lists layer-specific feature files in model architecture order.
 
 INPUT:
     - output_dir: str | Path -> directory containing extracted HDF5 feature files
@@ -27,7 +29,7 @@ INPUT:
     - pooling: str | None -> feature pooling used during extraction
 
 OUTPUT:
-    - feature_paths: list[Path] -> matching HDF5 files ordered by layer number
+    - feature_paths: list[Path] -> matching HDF5 files ordered from shallow to deep
 """
 def list_video_feature_files(
         output_dir, model_name, dataset_name, pooling="mean",
@@ -38,15 +40,19 @@ def list_video_feature_files(
     # ("videomae_base" would match "videomae_base_ssv2" files), so the stored
     # model name decides which files really belong to this model.
     feature_paths = []
+    layer_names_by_path = {}
     for candidate_path in Path(output_dir).glob(pattern):
-        # locking=False so a file another model's extraction still holds open
-        # can be identified instead of raising; only the creation-time
-        # model_name attribute is read here.
+        # locking=False lets us identify a file that another extraction still
+        # holds open; only creation-time identity metadata is read here.
         with h5py.File(candidate_path, "r", locking=False) as feature_file:
             stored_model_name = feature_file.attrs.get("model_name")
+            stored_layer_name = feature_file.attrs.get("layer_name")
         # end with h5py.File
         if stored_model_name is None or str(stored_model_name) == model_name:
             feature_paths.append(candidate_path)
+            if stored_layer_name is not None:
+                layer_names_by_path[candidate_path] = str(stored_layer_name)
+            # end if stored_layer_name is not None
         # end if the file belongs to this model
     # end for candidate_path
 
@@ -55,12 +61,44 @@ def list_video_feature_files(
         return [int(part) if part.isdigit() else part.lower() for part in parts]
     # EOF
 
-    feature_paths.sort(key=natural_sort_key)
     if not feature_paths:
         raise FileNotFoundError(
             f"No video feature files matching {pattern!r} in {output_dir}"
         )
     # end if not feature_paths
+
+    # Registry layers are already listed in forward-pass depth order. Sorting
+    # by this explicit rank also handles architectures whose module prefixes
+    # are not alphabetical, such as AlexNet's features followed by classifier.
+    model_spec = MODEL_ZOO.get(model_name)
+    if model_spec is not None:
+        layer_depths = {
+            layer_name: layer_index
+            for layer_index, layer_name in enumerate(model_spec.layers)
+        }
+        missing_layer_metadata = [
+            path.name for path in feature_paths if path not in layer_names_by_path
+        ]
+        unknown_layers = [
+            layer_names_by_path[path]
+            for path in feature_paths
+            if (
+                path in layer_names_by_path
+                and layer_names_by_path[path] not in layer_depths
+            )
+        ]
+        if missing_layer_metadata or unknown_layers:
+            raise ValueError(
+                f"Cannot order {model_name!r} feature files by architecture: "
+                f"missing layer metadata={missing_layer_metadata[:3]}, "
+                f"layers absent from MODEL_ZOO={unknown_layers[:3]}."
+            )
+        # end if incomplete architecture metadata
+        feature_paths.sort(key=lambda path: layer_depths[layer_names_by_path[path]])
+    else:
+        # Preserve support for legacy/custom models that predate MODEL_ZOO.
+        feature_paths.sort(key=natural_sort_key)
+    # end if model_spec is not None
     return feature_paths
 # EOF
 
@@ -683,22 +721,29 @@ INPUT:
     - model_source: str -> model repository or identifier
     - frame_stride: int -> decoded-frame sampling stride
     - extra_metadata: dict | None -> additional extraction settings stored in every file
+    - pooling_name: str | None -> pooling tag written in the filenames and the
+        metadata; defaults to the pooling the ANN itself applies
 
 OUTPUT:
     - feature_files: dict[str, h5py.File] -> open files keyed by layer name
 """
 def open_feature_files(
         output_dir, ann, layers, dataset_name, model_source, frame_stride,
-        extra_metadata=None,
+        extra_metadata=None, pooling_name=None,
         ):
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     feature_files = {}
+    # A reduction applied after the hook (a stored PCA, for instance) names the
+    # files itself, so the ANN pooling is only the fallback tag.
+    if pooling_name is None:
+        pooling_name = "none" if ann.pooling is None else ann.pooling
+    # end if pooling_name
     common_metadata = {
         "model_name": ann.model_name,
         "model_source": model_source,
         "dataset_name": dataset_name,
-        "pooling": "none" if ann.pooling is None else ann.pooling,
+        "pooling": pooling_name,
         "img_size": ann.img_size,
         "frame_stride": frame_stride,
     }
@@ -709,7 +754,7 @@ def open_feature_files(
     try:
         for layer in layers:
             output_path = feature_file_path(
-                output_dir, ann.model_name, layer, dataset_name, ann.pooling
+                output_dir, ann.model_name, layer, dataset_name, pooling_name
             )
             feature_file = h5py.File(output_path, "a")
             expected_metadata = {**common_metadata, "layer_name": layer}
@@ -785,6 +830,8 @@ INPUT:
     - max_frames: int | None -> optional cap on retained frames
     - dtype: torch.dtype -> inference dtype
     - compression: str | None -> optional HDF5 compression filter
+    - feature_transforms: dict[str, callable] | None -> per-layer reduction
+        applied to the hooked features before they are stored
 
 OUTPUT:
     - n_frames: int -> number of extracted video frames
@@ -800,6 +847,7 @@ def extract_video_features(
     max_frames=None,
     dtype=torch.float32,
     compression=None,
+    feature_transforms=None,
 ):
     video_path = Path(video_path)
     temporary_key = f"__incomplete__{video_path.name}"
@@ -847,6 +895,9 @@ def extract_video_features(
                     if features is None:
                         raise RuntimeError(f"Hook did not capture features for {layer}")
                     features = features.detach().float().cpu().numpy()
+                    if feature_transforms is not None:
+                        features = feature_transforms[layer](features)
+                    # end if feature_transforms
                     append_features(
                         feature_files[layer], temporary_key, features, compression=compression
                     )
@@ -874,6 +925,9 @@ def extract_video_features(
                     if features is None:
                         raise RuntimeError(f"Hook did not capture features for {layer}")
                     features = features.detach().float().cpu().numpy()
+                    if feature_transforms is not None:
+                        features = feature_transforms[layer](features)
+                    # end if feature_transforms
                     append_features(
                         feature_files[layer], temporary_key, features, compression=compression
                     )
@@ -920,6 +974,10 @@ INPUT:
     - dtype: torch.dtype -> inference dtype
     - compression: str | None -> optional HDF5 compression filter
     - overwrite: bool -> whether to recompute existing video datasets
+    - feature_transforms: dict[str, callable] | None -> per-layer reduction
+        applied to the hooked features before they are stored
+    - pooling_name: str | None -> pooling tag written in the filenames and the
+        metadata; defaults to the pooling the ANN itself applies
 
 OUTPUT:
     - output_paths: dict[str, Path] -> layer-specific files keyed by layer name
@@ -937,16 +995,23 @@ def extract_video_dataset_features(
     dtype=torch.float32,
     compression=None,
     overwrite=False,
+    feature_transforms=None,
+    pooling_name=None,
+    extra_metadata=None,
 ):
     layers = ann.get_relevant_layers()
+    if pooling_name is None:
+        pooling_name = "none" if ann.pooling is None else ann.pooling
+    # end if pooling_name
     output_paths = {
         layer: feature_file_path(
-            output_dir, ann.model_name, layer, dataset_name, ann.pooling
+            output_dir, ann.model_name, layer, dataset_name, pooling_name
         )
         for layer in layers
     }
     feature_files = open_feature_files(
-        output_dir, ann, layers, dataset_name, model_source, frame_stride
+        output_dir, ann, layers, dataset_name, model_source, frame_stride,
+        extra_metadata=extra_metadata, pooling_name=pooling_name,
     )
 
     try:
@@ -983,6 +1048,7 @@ def extract_video_dataset_features(
                 max_frames=max_frames,
                 dtype=dtype,
                 compression=compression,
+                feature_transforms=feature_transforms,
             )
             print(f"Saved {n_frames} frames for {video_path.name}")
         # end for video_path
