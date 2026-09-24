@@ -1,5 +1,6 @@
 __all__ = [
     'autoregressive_regress_out', 'cross_temporal_static_dynamic_regression',
+    'static_pattern_regress_out',
     'imagenet_val_dataloader', 'map_image_order_from_ann_to_monkey',
     'load_img_natraster', 'decode_matlab_strings', 'min_max_normalization',
     'load_natraster', 'load_raster', 'match_static_dynamic_rasters',
@@ -18,6 +19,7 @@ __all__ = [
     'split_half_filename_suffix',
     'bootstrap_rowwise_orthogonal_slopes',
     'rowwise_orthogonal_regression', 'window_mean_responses',
+    'window_peak_responses', 'window_smoothed_response_latencies',
     'participation_ratio', 'representation_measure_timecourses',
     'robust_normalize_responses', 'stimulus_min_max_normalization',
     'treves_rolls_sparseness',
@@ -31,7 +33,9 @@ __all__ = [
     'load_model_layer_rsa', 'rdm_noise_ceiling', 'summarize_model_analysis',
     'timecourse_latency',
     'build_neural_model_rsa_filename', 'compute_layer_neural_model_rsa',
-    'compute_neural_rdm_timeseries', 'filename_token', 'normalize_rsa_metric',
+    'compute_model_rdm_timeseries', 'compute_neural_rdm_timeseries',
+    'drsa_lag_profile', 'filename_token', 'fit_ols_svd_subspace',
+    'normalize_rsa_metric', 'project_onto_ols_subspace',
     'save_layer_neural_model_rsa',
     'latency_profile_smoothness', 'permute_rdm_entries',
     'permuted_static_rsa', 'prepare_static_neural_rdms',
@@ -57,6 +61,7 @@ from .dataloader import (
 )
 from .time_series_regression import (
     autoregressive_regress_out, cross_temporal_static_dynamic_regression,
+    static_pattern_regress_out,
 )
 from .split_half_rsa import (
     average_presentations, average_repetition_halves, compute_rdm_timeseries,
@@ -66,7 +71,8 @@ from .split_half_rsa import (
 )
 from .tuning_curves import (
     bootstrap_rowwise_orthogonal_slopes, rowwise_orthogonal_regression,
-    window_mean_responses,
+    window_mean_responses, window_peak_responses,
+    window_smoothed_response_latencies,
 )
 from .representation_sparsity import (
     cvpca_participation_ratio, participation_ratio,
@@ -83,7 +89,9 @@ from .manifold_dynamics import (
 )
 from .neural_model_rsa import (
     build_neural_model_rsa_filename, compute_layer_neural_model_rsa,
-    compute_neural_rdm_timeseries, filename_token, normalize_rsa_metric,
+    compute_model_rdm_timeseries, compute_neural_rdm_timeseries,
+    drsa_lag_profile, filename_token, fit_ols_svd_subspace,
+    normalize_rsa_metric, project_onto_ols_subspace,
     save_layer_neural_model_rsa,
 )
 from .rdm_permutation_control import (

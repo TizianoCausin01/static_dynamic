@@ -190,3 +190,76 @@ def autoregressive_regress_out(
     residual_ts = TimeSeries(residual_array, fs=response_ts.get_fs())
     return residual_ts, regression_model, variance_explained
 # EOF
+
+
+"""
+static_pattern_regress_out
+Fit, independently at every dynamic timepoint, a linear map from one static
+response pattern to the dynamic response across stimuli, then remove the
+predicted component. Stimuli are the regression samples, static channels are
+the predictors, and dynamic channels are the outputs.
+
+INPUT:
+    - static_pattern: np.ndarray -> static channels x stimuli predictor pattern.
+    - dynamic_ts: TimeSeries -> dynamic channels x time x stimuli response.
+    - regression_type: str -> useful_stuff linear model type ("lr" is OLS).
+    - fit_intercept: bool -> whether every timepoint fit includes an intercept.
+
+OUTPUT:
+    - residual_ts: TimeSeries -> dynamic channels x time x stimuli residuals.
+    - variance_explained: np.ndarray -> time fraction of across-stimulus
+        dynamic variance (summed over channels) removed by the static pattern.
+"""
+def static_pattern_regress_out(
+        static_pattern: np.ndarray,
+        dynamic_ts: TimeSeries,
+        regression_type: str = "lr",
+        fit_intercept: bool = True,
+        ) -> tuple[TimeSeries, np.ndarray]:
+    static_pattern = np.asarray(static_pattern, dtype=np.float64)
+    dynamic_array = np.asarray(dynamic_ts.get_array(), dtype=np.float64)
+    if static_pattern.ndim != 2 or dynamic_array.ndim != 3:
+        raise ValueError(
+            "static_pattern must be channels x stimuli and dynamic_ts "
+            "channels x time x stimuli."
+        )
+    # end if input dimensions
+    if static_pattern.shape[1] != dynamic_array.shape[2]:
+        raise ValueError("Static and dynamic responses must share stimuli.")
+    # end if static_pattern.shape[1] != dynamic_array.shape[2]
+    if static_pattern.shape[0] + int(fit_intercept) >= static_pattern.shape[1]:
+        raise ValueError(
+            "The OLS fit needs more stimuli than predictors; otherwise the "
+            "residual is trivially zero."
+        )
+    # end if too many predictors
+
+    # fit_static_dyn stores one (dynamic x static channels) weight matrix per
+    # dynamic timepoint, so no weights are shared across movie time.
+    regression_model = dyn_linear_encoding(
+        regression_type=regression_type,
+        cv_type="same",
+        max_lag=0,
+        fit_intercept=fit_intercept,
+    )
+    fit_ts = TimeSeries(dynamic_array, fs=dynamic_ts.get_fs())
+    regression_model.fit_static_dyn(static_pattern, fit_ts)
+    predicted_ts = regression_model.predict_static_dyn(static_pattern)
+    # The prediction is a list of channels x stimuli arrays; stack along time.
+    predicted_ts.to_numpy()
+    residual_array = dynamic_array - predicted_ts.get_array()
+
+    # Across-stimulus variance summed over channels, one value per timepoint.
+    target_variance = np.var(dynamic_array, axis=2).sum(axis=0)
+    residual_variance = np.var(residual_array, axis=2).sum(axis=0)
+    variance_explained = np.zeros_like(target_variance)
+    np.divide(
+        target_variance - residual_variance,
+        target_variance,
+        out=variance_explained,
+        where=target_variance > 0,
+    )
+
+    residual_ts = TimeSeries(residual_array, fs=dynamic_ts.get_fs())
+    return residual_ts, variance_explained
+# EOF

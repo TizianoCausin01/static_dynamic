@@ -5,7 +5,7 @@ import re
 import numpy as np
 
 from image_processing.video_feature_extraction import load_aligned_video_features
-from useful_stuff.general_utils import TimeSeries, create_RDM
+from useful_stuff.general_utils import TimeSeries, create_RDM, get_lagplot_subset
 
 from .split_half_rsa import compute_rdm_timeseries, cross_temporal_similarity
 
@@ -276,4 +276,205 @@ def save_layer_neural_model_rsa(
         metadata_json=np.asarray(json.dumps(metadata, sort_keys=True)),
     )
     return output_path
+# EOF
+
+
+"""
+compute_model_rdm_timeseries
+Compute one model RDM per source frame and upsample the RDM timecourse to the
+neural analysis grid. Upsampling in TimeSeries repeats frame indices, so this
+equals upsampling the features first while never materializing the large
+upsampled feature array (e.g. dense optical flow).
+
+INPUT:
+    - model_features: np.ndarray -> features x source frames x stimuli
+    - source_fs: float -> model frame rate
+    - analysis_fs: float -> neural analysis sampling rate (>= source_fs)
+    - rdm_metric: str -> model-feature RDM dissimilarity measure
+
+OUTPUT:
+    - model_rdms: np.ndarray -> analysis time x stimulus-pair distances
+"""
+def compute_model_rdm_timeseries(
+        model_features: np.ndarray,
+        source_fs: float,
+        analysis_fs: float,
+        rdm_metric: str,
+        ) -> np.ndarray:
+    if analysis_fs < source_fs:
+        raise ValueError(
+            "analysis_fs must be >= source_fs; downsampling RDMs is not "
+            "equivalent to downsampling features."
+        )
+    # end if analysis_fs < source_fs
+    source_rdms = compute_rdm_timeseries(model_features, rdm_metric)
+    # TimeSeries expects features x time, so RDM entries become the features.
+    rdm_ts = TimeSeries(np.ascontiguousarray(source_rdms.T), fs=source_fs)
+    rdm_ts.resample(analysis_fs)
+    return np.ascontiguousarray(rdm_ts.get_array().T)
+# EOF
+
+
+"""
+drsa_lag_profile
+Average a neural x model dRSA matrix along its diagonals within a time window
+and express every diagonal as a physical lag (neural time - model time).
+
+INPUT:
+    - drsa_matrix: np.ndarray -> neural time x model time dRSA values
+    - analysis_fs: float -> shared sampling rate of both time axes
+    - analysis_end_ms: float -> only times before this bound enter the profile
+    - max_lag_ms: float -> largest absolute lag returned
+    - model_time_offset_ms: float -> physical time of model sample 0
+
+OUTPUT:
+    - lag_ms: np.ndarray -> physical lags; positive means neural lags model
+    - lag_profile: np.ndarray -> mean dRSA at every lag
+"""
+def drsa_lag_profile(
+        drsa_matrix: np.ndarray,
+        analysis_fs: float,
+        analysis_end_ms: float,
+        max_lag_ms: float,
+        model_time_offset_ms: float = 0.0,
+        ) -> tuple[np.ndarray, np.ndarray]:
+    neural_time_ms = np.arange(drsa_matrix.shape[0]) * 1000 / analysis_fs
+    model_time_ms = (
+        model_time_offset_ms
+        + np.arange(drsa_matrix.shape[1]) * 1000 / analysis_fs
+    )
+    neural_indices = np.flatnonzero(neural_time_ms < analysis_end_ms)
+    model_indices = np.flatnonzero(model_time_ms < analysis_end_ms)
+    max_lag_samples = min(
+        int(round(max_lag_ms * analysis_fs / 1000)),
+        len(neural_indices) - 1,
+        len(model_indices) - 1,
+    )
+    if max_lag_samples < 1:
+        raise ValueError("The lag-analysis window is too short.")
+    # end if max_lag_samples < 1
+
+    lag_profile = get_lagplot_subset(
+        drsa_matrix,
+        neural_idx=neural_indices,
+        model_idx=model_indices,
+        max_lag=max_lag_samples,
+    )
+    # get_lagplot_subset orders entries by neural index - model index.
+    sample_lags = np.arange(-max_lag_samples, max_lag_samples + 1)
+    lag_ms = sample_lags * 1000 / analysis_fs - model_time_offset_ms
+    return lag_ms, lag_profile
+# EOF
+
+
+"""
+fit_ols_svd_subspace
+Fit an ordinary least-squares model-to-neural map and return its ordered model
+input directions. The directions are the left singular vectors of the
+features-by-neurons coefficient matrix; no singular-value gain is retained.
+
+INPUT:
+    - model_samples: np.ndarray -> samples x model features
+    - neural_samples: np.ndarray -> matched samples x neural features
+    - relative_tolerance: float or None -> numerical-rank cutoff relative to
+      the largest coefficient singular value
+
+OUTPUT:
+    - result: dict -> orthonormal model basis, singular values, rank, and OLS fit
+"""
+def fit_ols_svd_subspace(
+        model_samples: np.ndarray,
+        neural_samples: np.ndarray,
+        relative_tolerance: float | None = None,
+        ) -> dict[str, np.ndarray | int | float]:
+    model_samples = np.asarray(model_samples, dtype=float)
+    neural_samples = np.asarray(neural_samples, dtype=float)
+    if model_samples.ndim != 2 or neural_samples.ndim != 2:
+        raise ValueError("model_samples and neural_samples must be two-dimensional.")
+    # end if inputs are not matrices
+    if model_samples.shape[0] != neural_samples.shape[0]:
+        raise ValueError("Model and neural spaces must contain the same samples.")
+    # end if sample counts differ
+    if model_samples.shape[0] < 2:
+        raise ValueError("At least two matched samples are required.")
+    # end if too few samples
+    if not np.all(np.isfinite(model_samples)) or not np.all(
+            np.isfinite(neural_samples)):
+        raise ValueError("Model and neural samples must contain only finite values.")
+    # end if non-finite values
+
+    model_mean = model_samples.mean(axis=0, keepdims=True)
+    neural_mean = neural_samples.mean(axis=0, keepdims=True)
+    centered_model = model_samples - model_mean
+    centered_neural = neural_samples - neural_mean
+
+    # This is the coefficient matrix of OLS with an intercept. Its model-side
+    # singular vectors define the nested predictive subspaces.
+    coefficient, _, _, _ = np.linalg.lstsq(
+        centered_model, centered_neural, rcond=None,
+    )
+    model_basis, singular_values, neural_basis_t = np.linalg.svd(
+        coefficient, full_matrices=False,
+    )
+
+    if relative_tolerance is None:
+        relative_tolerance = (
+            max(coefficient.shape) * np.finfo(float).eps
+        )
+    # end if relative_tolerance is None
+    if relative_tolerance < 0:
+        raise ValueError("relative_tolerance must be non-negative.")
+    # end if relative_tolerance is negative
+
+    largest_singular_value = singular_values.max(initial=0.0)
+    active = singular_values > relative_tolerance * largest_singular_value
+    return {
+        "basis": model_basis[:, active],
+        "singular_values": singular_values,
+        "active": active,
+        "rank": int(np.sum(active)),
+        "coefficient": coefficient,
+        "model_mean": model_mean,
+        "neural_mean": neural_mean,
+        "neural_basis_t": neural_basis_t,
+        "relative_tolerance": float(relative_tolerance),
+    }
+# EOF
+
+
+"""
+project_onto_ols_subspace
+Express model samples in the first fitted OLS/SVD input directions without
+applying regression coefficients, singular values, or output-space stretches.
+
+INPUT:
+    - model_samples: np.ndarray -> array whose final axis contains model features
+    - subspace_fit: dict -> output of fit_ols_svd_subspace
+    - rank: int -> number of ordered model directions to retain
+
+OUTPUT:
+    - projected_samples: np.ndarray -> input array with final axis replaced by rank
+"""
+def project_onto_ols_subspace(
+        model_samples: np.ndarray,
+        subspace_fit: dict,
+        rank: int,
+        ) -> np.ndarray:
+    model_samples = np.asarray(model_samples)
+    basis = np.asarray(subspace_fit["basis"])
+    if model_samples.ndim < 2:
+        raise ValueError("model_samples must have a sample and feature axis.")
+    # end if model_samples has too few dimensions
+    if model_samples.shape[-1] != basis.shape[0]:
+        raise ValueError(
+            "The final model_samples axis does not match the fitted feature count."
+        )
+    # end if feature counts differ
+    if not 1 <= rank <= basis.shape[1]:
+        raise ValueError(f"rank must be between 1 and {basis.shape[1]}.")
+    # end if rank is invalid
+
+    # Deliberately omit both centering and Sigma. Constant translations do not
+    # affect Euclidean/cosine_cnt RDMs, and this matches the metrics_II transform.
+    return model_samples @ basis[:, :rank]
 # EOF

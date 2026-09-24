@@ -1,4 +1,5 @@
 import numpy as np
+from scipy.ndimage import gaussian_filter1d
 
 
 """
@@ -58,6 +59,143 @@ def window_mean_responses(
 
     mean_responses = rasters[:, start_index:end_index, :].mean(axis=1)
     return mean_responses, (start_index, end_index)
+# EOF
+
+
+"""
+window_smoothed_response_latencies
+Gaussian-smooth a channels x time x stimuli raster, then summarize each
+channel-stimulus timecourse by its peak and positive-mass centroid latency.
+Smoothing is applied before windowing so the requested window does not create
+artificial filter edges. Centroids are undefined when a window has no positive
+response mass.
+
+INPUT:
+    - rasters: np.ndarray -> channels x time x stimuli neural responses
+    - window_ms: tuple[float, float] -> start and exclusive end in milliseconds
+    - fs: float -> raster sampling frequency in Hz
+    - smoothing_sigma_ms: float -> Gaussian standard deviation in milliseconds
+
+OUTPUT:
+    - peak_responses: np.ndarray -> channels x stimuli smoothed peak responses
+    - peak_latencies_ms: np.ndarray -> channels x stimuli absolute peak times
+    - centroid_latencies_ms: np.ndarray -> channels x stimuli absolute centroids
+    - sample_window: tuple[int, int] -> start and exclusive end sample indices
+"""
+def window_smoothed_response_latencies(
+        rasters: np.ndarray,
+        window_ms: tuple[float, float],
+        fs: float,
+        smoothing_sigma_ms: float,
+        ) -> tuple[np.ndarray, np.ndarray, np.ndarray, tuple[int, int]]:
+    rasters = np.asarray(rasters)
+    if rasters.ndim != 3:
+        raise ValueError(
+            "rasters must have shape channels x time x stimuli."
+        )
+    # end if rasters.ndim
+    if len(window_ms) != 2:
+        raise ValueError("window_ms must contain (start_ms, end_ms).")
+    # end if len(window_ms)
+    if fs <= 0:
+        raise ValueError("fs must be positive.")
+    # end if fs
+    if smoothing_sigma_ms <= 0:
+        raise ValueError("smoothing_sigma_ms must be positive.")
+    # end if smoothing sigma
+    if not np.all(np.isfinite(rasters)):
+        raise ValueError("rasters contain non-finite values.")
+    # end if finite rasters
+
+    start_ms, end_ms = window_ms
+    if not (0 <= start_ms < end_ms):
+        raise ValueError(
+            "window_ms must satisfy 0 <= start_ms < end_ms."
+        )
+    # end if invalid window
+
+    # Ceil selects exactly the samples whose timestamps satisfy the window.
+    start_index = int(np.ceil(start_ms * fs / 1000))
+    end_index = int(np.ceil(end_ms * fs / 1000))
+    if start_index >= rasters.shape[1] or end_index > rasters.shape[1]:
+        duration_ms = rasters.shape[1] * 1000 / fs
+        raise ValueError(
+            f"Window {window_ms} ms lies outside the {duration_ms:g} ms raster."
+        )
+    # end if window outside raster
+    if end_index <= start_index:
+        raise ValueError("window_ms selects no raster samples.")
+    # end if empty window
+
+    sigma_samples = smoothing_sigma_ms * fs / 1000
+    smoothed_rasters = gaussian_filter1d(
+        rasters, sigma=sigma_samples, axis=1, mode="nearest",
+    )
+    windowed_rasters = smoothed_rasters[:, start_index:end_index, :]
+    peak_offsets = np.argmax(windowed_rasters, axis=1)
+    peak_responses = np.take_along_axis(
+        windowed_rasters, peak_offsets[:, np.newaxis, :], axis=1,
+    )[:, 0, :]
+    peak_latencies_ms = (start_index + peak_offsets) * 1000 / fs
+
+    # Only positive response mass supplies centroid weight, matching the
+    # positive-mass latency convention used by the project's dRSA analyses.
+    centroid_weights = np.clip(windowed_rasters, 0, None)
+    window_time_ms = np.arange(start_index, end_index) * 1000 / fs
+    centroid_weight_sums = centroid_weights.sum(axis=1)
+    centroid_weighted_times = np.einsum(
+        "cts,t->cs", centroid_weights, window_time_ms,
+    )
+    centroid_latencies_ms = np.full(
+        centroid_weight_sums.shape, np.nan, dtype=float,
+    )
+    np.divide(
+        centroid_weighted_times,
+        centroid_weight_sums,
+        out=centroid_latencies_ms,
+        where=centroid_weight_sums > 0,
+    )
+
+    return (
+        peak_responses,
+        peak_latencies_ms,
+        centroid_latencies_ms,
+        (start_index, end_index),
+    )
+# EOF
+
+
+"""
+window_peak_responses
+Gaussian-smooth a channels x time x stimuli raster, then return each
+channel-stimulus peak and its absolute latency inside a half-open time window.
+
+INPUT:
+    - rasters: np.ndarray -> channels x time x stimuli neural responses
+    - window_ms: tuple[float, float] -> start and exclusive end in milliseconds
+    - fs: float -> raster sampling frequency in Hz
+    - smoothing_sigma_ms: float -> Gaussian standard deviation in milliseconds
+
+OUTPUT:
+    - peak_responses: np.ndarray -> channels x stimuli smoothed peak responses
+    - peak_latencies_ms: np.ndarray -> channels x stimuli absolute peak times
+    - sample_window: tuple[int, int] -> start and exclusive end sample indices
+"""
+def window_peak_responses(
+        rasters: np.ndarray,
+        window_ms: tuple[float, float],
+        fs: float,
+        smoothing_sigma_ms: float,
+        ) -> tuple[np.ndarray, np.ndarray, tuple[int, int]]:
+    (
+        peak_responses,
+        peak_latencies_ms,
+        _,
+        sample_window,
+    ) = window_smoothed_response_latencies(
+        rasters, window_ms, fs, smoothing_sigma_ms,
+    )
+    return peak_responses, peak_latencies_ms, sample_window
 # EOF
 
 
