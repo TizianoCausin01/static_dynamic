@@ -28,12 +28,14 @@ sys.path.append(paths["useful_stuff_path"])
 from image_processing.video_feature_extraction import (
     list_video_feature_files,
     match_feature_stimulus_names,
+    stimulus_key,
 )
 from project_specific_utils import (
     build_neural_model_rsa_filename,
     compute_layer_neural_model_rsa,
     compute_neural_rdm_timeseries,
     load_natraster,
+    match_static_dynamic_rasters,
     min_max_normalization,
     normalize_rsa_metric,
     save_layer_neural_model_rsa,
@@ -437,6 +439,35 @@ def prepare_analysis_state(
             "Static and dynamic recordings retained different channel numbers."
         )
     # end if inconsistent channel selections
+
+    # Keep only stimulus identities shared by the image and movie sessions.
+    # Some sessions contain extra movie variants without corresponding images
+    # or model features; these must not enter either side of the comparison.
+    static_rasters, dynamic_rasters, shared_stimuli = (
+        match_static_dynamic_rasters(
+            static_ts.get_array(), static_stimulus_names,
+            dynamic_ts.get_array(), dynamic_stimulus_names,
+        )
+    )
+    static_names_by_key = {
+        stimulus_key(name): name for name in static_stimulus_names
+    }
+    dynamic_names_by_key = {
+        stimulus_key(name): name for name in dynamic_stimulus_names
+    }
+    static_stimulus_names = [
+        static_names_by_key[stimulus] for stimulus in shared_stimuli
+    ]
+    dynamic_stimulus_names = [
+        dynamic_names_by_key[stimulus] for stimulus in shared_stimuli
+    ]
+    static_ts = TimeSeries(static_rasters, fs=static_ts.get_fs())
+    dynamic_ts = TimeSeries(dynamic_rasters, fs=dynamic_ts.get_fs())
+    print(
+        f"Aligned {len(shared_stimuli)} shared static/dynamic stimuli.",
+        flush=True,
+    )
+
     static_feature_names = match_feature_stimulus_names(
         first_feature_path, static_stimulus_names,
     )
