@@ -2,6 +2,7 @@ from pathlib import Path
 
 import cv2
 import h5py
+import joblib
 import numpy as np
 
 
@@ -424,4 +425,53 @@ def load_aligned_pixel_value_features(feature_path, movie_names):
         }
     # end with h5py.File
     return features, effective_fps, metadata
+# EOF
+
+
+"""
+load_pixel_pca_component_images
+Loads RGB-pixel PCA components and unflattens them into image-shaped arrays.
+
+The PCA input vectors are pixel-major RGB, `[R0, G0, B0, R1, G1, B1, ...]`,
+with pixels in row-major order. Each component therefore reshapes directly to
+`(image_height, image_width, 3)`. The PCA object is memory-mapped so only the
+requested components are read from disk.
+
+INPUT:
+    - pca_path: str | Path -> joblib file of the fitted RGB-pixel PCA
+    - n_components: int -> number of leading components to unflatten
+    - image_height: int -> height of the frame grid used for PCA fitting
+    - image_width: int -> width of the frame grid used for PCA fitting
+
+OUTPUT:
+    - component_images: np.ndarray -> (n_components, height, width, 3) weights
+    - mean_image: np.ndarray -> (height, width, 3) mean RGB frame
+    - explained_variance_ratio: np.ndarray -> (n_components,) variance ratios
+"""
+def load_pixel_pca_component_images(
+        pca_path,
+        n_components,
+        image_height,
+        image_width,
+        ):
+    pca = joblib.load(pca_path, mmap_mode="r")
+    expected_features = image_height * image_width * 3
+    if pca.components_.shape[1] != expected_features:
+        raise ValueError(
+            f"PCA has {pca.components_.shape[1]} input features; expected "
+            f"{expected_features} for a {image_height}x{image_width} RGB grid."
+        )
+    # end if feature count
+
+    n_components = min(n_components, pca.components_.shape[0])
+    image_shape = (image_height, image_width, 3)
+    # Copy the slice out of the memmap, then restore the spatial RGB layout.
+    component_images = np.asarray(pca.components_[:n_components]).reshape(
+        n_components, *image_shape,
+    )
+    mean_image = np.asarray(pca.mean_).reshape(image_shape)
+    explained_variance_ratio = np.asarray(
+        pca.explained_variance_ratio_[:n_components]
+    )
+    return component_images, mean_image, explained_variance_ratio
 # EOF
