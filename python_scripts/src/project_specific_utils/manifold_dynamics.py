@@ -1,5 +1,8 @@
+import matplotlib.pyplot as plt
 import numpy as np
+from scipy.ndimage import gaussian_filter
 
+from .channelwise_correlation import channelwise_regress_out
 from .split_half_rsa import (
     compute_rdm_timeseries,
     cross_temporal_similarity,
@@ -159,6 +162,241 @@ def compute_cross_temporal_drsa(
     return cross_temporal_similarity(
         dynamic_rdms, static_rdms, metric=rsa_metric,
     )
+# EOF
+
+
+"""
+bin_average_rasters
+Average consecutive samples into non-overlapping time bins.
+
+INPUT:
+    - rasters: np.ndarray -> channels x time x stimuli neural responses
+    - source_fs: float -> sampling frequency of rasters in Hz
+    - bin_fs: float -> output sampling frequency; source_fs / bin_fs must be
+      an integer
+
+OUTPUT:
+    - binned_rasters: np.ndarray -> channels x bins x stimuli; an incomplete
+      final bin is dropped
+"""
+def bin_average_rasters(
+        rasters: np.ndarray,
+        source_fs: float,
+        bin_fs: float,
+        ) -> np.ndarray:
+    bin_size = source_fs / bin_fs
+    if bin_size < 1 or not np.isclose(bin_size, round(bin_size)):
+        raise ValueError("source_fs / bin_fs must be a positive integer.")
+    # end if invalid bin size
+    bin_size = int(round(bin_size))
+    n_channels, n_samples, n_stimuli = rasters.shape
+    n_bins = n_samples // bin_size
+    # channels x bins x samples-per-bin x stimuli, then average within bins.
+    return rasters[:, :n_bins * bin_size, :].reshape(
+        n_channels, n_bins, bin_size, n_stimuli,
+    ).mean(axis=2)
+# EOF
+
+
+
+"""
+regress_out_rdm_timeseries
+Remove a predictor RDM from a target RDM independently at every timepoint.
+At each time, the target RDM vector is regressed on the predictor RDM vector
+(OLS with intercept) across stimulus pairs, and the residual is kept.
+
+INPUT:
+    - target_rdms: np.ndarray -> time x stimulus-pair distances
+    - predictor_rdms: np.ndarray -> time x stimulus-pair distances, same shape
+
+OUTPUT:
+    - residual_rdms: np.ndarray -> time x stimulus-pair residual distances
+    - variance_removed: np.ndarray -> fraction of target variance explained
+      by the predictor at every timepoint
+"""
+def regress_out_rdm_timeseries(
+        target_rdms: np.ndarray,
+        predictor_rdms: np.ndarray,
+        ) -> tuple[np.ndarray, np.ndarray]:
+    target_rdms = np.asarray(target_rdms, dtype=np.float64)
+    predictor_rdms = np.asarray(predictor_rdms, dtype=np.float64)
+    if target_rdms.shape != predictor_rdms.shape:
+        raise ValueError("target_rdms and predictor_rdms must match in shape.")
+    # end if shapes differ
+
+    # Centering each row implements the intercept of the per-time regression.
+    target_centered = target_rdms - target_rdms.mean(axis=1, keepdims=True)
+    predictor_centered = (
+        predictor_rdms - predictor_rdms.mean(axis=1, keepdims=True)
+    )
+    predictor_variance = (predictor_centered ** 2).sum(axis=1)
+    betas = np.zeros(len(target_rdms))
+    np.divide(
+        (target_centered * predictor_centered).sum(axis=1),
+        predictor_variance, out=betas, where=predictor_variance > 0,
+    )
+    residual_rdms = target_centered - betas[:, None] * predictor_centered
+
+    target_variance = (target_centered ** 2).sum(axis=1)
+    variance_removed = np.full(len(target_rdms), np.nan)
+    np.divide(
+        target_variance - (residual_rdms ** 2).sum(axis=1),
+        target_variance, out=variance_removed, where=target_variance > 0,
+    )
+    return residual_rdms, variance_removed
+# EOF
+
+
+"""
+static_dynamic_drsa_peak
+Find the static and dynamic timepoints whose RDMs match best in the
+cross-temporal static-dynamic dRSA. Rasters are bin-averaged first, and the
+peak is searched only among bins whose full +/- half_window_ms window lies
+inside the requested search ranges. If previous_static_rasters is given, the
+previous-frame response is regressed out of the static response at every
+static time, so only last-frame-specific structure remains. With
+previous_regression="rdm" the static RDM is residualized on the previous-frame
+RDM across stimulus pairs; with "signal" each channel's static response is
+residualized on the same channel's previous-frame response across stimuli, and
+the static RDM is then built from those residuals.
+
+INPUT:
+    - static_rasters: np.ndarray -> channels x static time x matched stimuli
+    - dynamic_rasters: np.ndarray -> channels x dynamic time x matched stimuli
+    - source_fs: float -> sampling frequency of both rasters in Hz
+    - drsa_fs: float -> sampling frequency used for the dRSA bins
+    - static_search_ms: tuple[float, float] -> allowed static window span
+    - dynamic_search_ms: tuple[float, float] -> allowed dynamic window span
+    - half_window_ms: float -> half-width of the windows around the peak
+    - rdm_metric: str -> dissimilarity used to construct each timepoint RDM
+    - rsa_metric: str -> correlation or spearman RDM similarity
+    - smoothing_sigma_bins: float -> Gaussian sigma (in dRSA bins) applied
+      to the matrix before the peak search; 0 disables smoothing
+    - previous_static_rasters: np.ndarray | None -> channels x static time x
+      matched stimuli responses to the previous movie frame shown as an image
+    - previous_regression: str -> "rdm" (regress RDMs) or "signal" (regress
+      responses channel by channel, then build RDMs from the residuals)
+
+OUTPUT:
+    - drsa_peak: dict -> full dRSA matrix (dynamic time x static time), bin
+      centre times, search mask, peak bin indices, peak times, peak value,
+      and per-static-bin variance removed by the previous frame (or None);
+      for "signal" this is the across-stimulus response variance, pooled
+      over channels
+"""
+def static_dynamic_drsa_peak(
+        static_rasters: np.ndarray,
+        dynamic_rasters: np.ndarray,
+        source_fs: float,
+        drsa_fs: float,
+        static_search_ms: tuple[float, float],
+        dynamic_search_ms: tuple[float, float],
+        half_window_ms: float,
+        rdm_metric: str = "cosine_cnt",
+        rsa_metric: str = "correlation",
+        smoothing_sigma_bins: float = 0,
+        previous_static_rasters: np.ndarray | None = None,
+        previous_regression: str = "rdm",
+        ) -> dict:
+    if previous_regression not in ("rdm", "signal"):
+        raise ValueError("previous_regression must be 'rdm' or 'signal'.")
+    # end if invalid previous_regression
+    static_binned = bin_average_rasters(static_rasters, source_fs, drsa_fs)
+    dynamic_binned = bin_average_rasters(dynamic_rasters, source_fs, drsa_fs)
+
+    previous_binned = None
+    if previous_static_rasters is not None:
+        previous_binned = bin_average_rasters(
+            previous_static_rasters, source_fs, drsa_fs,
+        )
+        if previous_binned.shape != static_binned.shape:
+            raise ValueError(
+                "previous_static_rasters must match static_rasters in shape."
+            )
+        # end if previous-frame shape differs
+    # end if previous frame given
+
+    variance_removed = None
+    if previous_binned is not None and previous_regression == "signal":
+        # Per channel and static bin: OLS of the last-frame response on the
+        # previous-frame response across stimuli; keep the residual response.
+        target_binned = static_binned
+        static_binned, _, _, _ = channelwise_regress_out(
+            previous_binned, target_binned,
+        )
+        # Fraction of across-stimulus variance removed, pooled over channels.
+        target_variance = target_binned.var(axis=2).sum(axis=0)
+        residual_variance = static_binned.var(axis=2).sum(axis=0)
+        variance_removed = np.full(len(target_variance), np.nan)
+        np.divide(
+            target_variance - residual_variance, target_variance,
+            out=variance_removed, where=target_variance > 0,
+        )
+    # end if signal regression
+
+    # RDM time series are time x stimulus pairs.
+    static_rdms = compute_rdm_timeseries(static_binned, metric=rdm_metric)
+    dynamic_rdms = compute_rdm_timeseries(dynamic_binned, metric=rdm_metric)
+
+    if previous_binned is not None and previous_regression == "rdm":
+        previous_rdms = compute_rdm_timeseries(
+            previous_binned, metric=rdm_metric,
+        )
+        static_rdms, variance_removed = regress_out_rdm_timeseries(
+            static_rdms, previous_rdms,
+        )
+    # end if RDM regression
+
+    similarity = cross_temporal_similarity(
+        dynamic_rdms, static_rdms, metric=rsa_metric,
+    )
+
+    # Bin i averages samples [i, i + 1) / drsa_fs, so its centre is i + 0.5.
+    bin_ms = 1000 / drsa_fs
+    static_time_ms = (np.arange(static_binned.shape[1]) + 0.5) * bin_ms
+    dynamic_time_ms = (np.arange(dynamic_binned.shape[1]) + 0.5) * bin_ms
+
+    # Keep only centres whose full window fits inside the search range.
+    static_allowed = (
+        (static_time_ms - half_window_ms >= static_search_ms[0])
+        & (static_time_ms + half_window_ms <= static_search_ms[1])
+    )
+    dynamic_allowed = (
+        (dynamic_time_ms - half_window_ms >= dynamic_search_ms[0])
+        & (dynamic_time_ms + half_window_ms <= dynamic_search_ms[1])
+    )
+    search_mask = dynamic_allowed[:, None] & static_allowed[None, :]
+    if not search_mask.any():
+        raise ValueError("No dRSA bin fits inside both search ranges.")
+    # end if empty search range
+
+    # Smooth only the copy used to find the peak; single bins are noisy.
+    peak_similarity = similarity
+    if smoothing_sigma_bins > 0:
+        peak_similarity = gaussian_filter(
+            np.nan_to_num(similarity, nan=np.nanmin(similarity)),
+            sigma=smoothing_sigma_bins,
+        )
+    # end if smoothing
+    searched_similarity = np.where(search_mask, peak_similarity, np.nan)
+    dynamic_index, static_index = np.unravel_index(
+        np.nanargmax(searched_similarity), similarity.shape,
+    )
+    return {
+        "similarity": similarity,
+        "static_time_ms": static_time_ms,
+        "dynamic_time_ms": dynamic_time_ms,
+        "search_mask": search_mask,
+        "peak_static_index": int(static_index),
+        "peak_dynamic_index": int(dynamic_index),
+        "peak_static_ms": float(static_time_ms[static_index]),
+        "peak_dynamic_ms": float(dynamic_time_ms[dynamic_index]),
+        "peak_value": float(similarity[dynamic_index, static_index]),
+        "previous_frame_variance_removed": variance_removed,
+        "peak_smoothed_value": float(
+            peak_similarity[dynamic_index, static_index]
+        ),
+    }
 # EOF
 
 
@@ -399,4 +637,176 @@ def compute_cross_temporal_manifold_dynamics(
         }
     # end for subset_name, stimulus_indices
     return results
+# EOF
+
+
+"""
+plot_static_dynamic_matrix
+Draw a dynamic time x static time matrix in the OC_presentation style: movie
+time on x, static-image time on y, both in ms from onset, and a red dashed
+line at the last-frame onset.
+
+INPUT:
+    - axis: matplotlib.axes.Axes -> axis to draw on
+    - matrix: np.ndarray -> dynamic time x static time values
+    - bin_ms: float -> duration of one time bin in ms
+    - cmap: str -> matplotlib colormap name
+    - vmin: float | None -> lower color limit
+    - vmax: float | None -> upper color limit
+    - colorbar_label: str -> colorbar label
+    - last_frame_onset_ms: float | None -> movie time of the last-frame onset
+    - last_frame_color: str -> color of the last-frame line
+    - ticks_size: float -> tick-label font size
+    - label_size: float -> axis-label font size
+
+OUTPUT:
+    - image: matplotlib.image.AxesImage -> drawn matrix image
+"""
+def plot_static_dynamic_matrix(
+        axis,
+        matrix: np.ndarray,
+        bin_ms: float,
+        cmap: str = "viridis",
+        vmin: float | None = 0,
+        vmax: float | None = 0.65,
+        colorbar_label: str = r"RSA corr ($\rho$)",
+        last_frame_onset_ms: float | None = 2500,
+        last_frame_color: str = "red",
+        ticks_size: float = 20,
+        label_size: float = 25,
+        ):
+    # Bin i spans [i, i + 1) * bin_ms, so the axes run from 0 to n * bin_ms.
+    dynamic_time_end_ms = matrix.shape[0] * bin_ms
+    static_time_end_ms = matrix.shape[1] * bin_ms
+    image = axis.imshow(
+        matrix.T, cmap=cmap, vmin=vmin, vmax=vmax,
+        aspect="auto", origin="lower",
+        extent=(0, dynamic_time_end_ms, 0, static_time_end_ms),
+    )
+    if last_frame_onset_ms is not None:
+        axis.axvline(
+            last_frame_onset_ms, linestyle="--", color=last_frame_color,
+        )
+    # end if last-frame line
+    axis.set(xlabel="vid response (ms)", ylabel="img response (ms)")
+    axis.tick_params(axis="both", labelsize=ticks_size)
+    axis.xaxis.label.set_size(label_size)
+    axis.yaxis.label.set_size(label_size)
+    colorbar = axis.figure.colorbar(image, ax=axis)
+    colorbar.ax.tick_params(labelsize=ticks_size)
+    colorbar.set_label(colorbar_label, fontsize=label_size)
+    return image
+# EOF
+
+
+"""
+plot_static_dynamic_drsa_peak
+Draw the static-dynamic dRSA in the OC_presentation style, with the peak
+search box (dashed white) and the selected peak (white cross).
+
+INPUT:
+    - axis: matplotlib.axes.Axes -> axis to draw on
+    - drsa_peak: dict -> output of static_dynamic_drsa_peak
+    - static_search_ms: tuple[float, float] -> static search range
+    - dynamic_search_ms: tuple[float, float] -> dynamic search range
+    - **matrix_kwargs -> style options passed to plot_static_dynamic_matrix
+
+OUTPUT:
+    - image: matplotlib.image.AxesImage -> drawn dRSA image
+"""
+def plot_static_dynamic_drsa_peak(
+        axis,
+        drsa_peak: dict,
+        static_search_ms: tuple[float, float],
+        dynamic_search_ms: tuple[float, float],
+        **matrix_kwargs,
+        ):
+    static_time_ms = drsa_peak["static_time_ms"]
+    bin_ms = static_time_ms[1] - static_time_ms[0]
+    image = plot_static_dynamic_matrix(
+        axis, drsa_peak["similarity"], bin_ms, **matrix_kwargs,
+    )
+    axis.add_patch(plt.Rectangle(
+        (dynamic_search_ms[0], static_search_ms[0]),
+        dynamic_search_ms[1] - dynamic_search_ms[0],
+        static_search_ms[1] - static_search_ms[0],
+        fill=False, edgecolor="white", linestyle="--", linewidth=1,
+    ))
+    axis.plot(
+        drsa_peak["peak_dynamic_ms"], drsa_peak["peak_static_ms"],
+        marker="x", color="white", markersize=10, markeredgewidth=2,
+    )
+    return image
+# EOF
+
+
+"""
+plot_significance_masked_matrix
+Draw a static-dynamic matrix with plot_static_dynamic_matrix, keeping the
+significant cells sharp and outlined while the rest is blurred and faded.
+
+INPUT:
+    - axis: matplotlib.axes.Axes -> axis to draw on
+    - matrix: np.ndarray -> dynamic time x static time values
+    - significant: np.ndarray -> dynamic time x static time boolean mask
+    - bin_ms: float -> duration of one matrix bin in ms
+    - nonsignificant_blur_sigma: float -> Gaussian sigma (bins) applied to the
+        non-significant cells; 0 disables the blur
+    - nonsignificant_fade_alpha: float -> opacity of the white veil drawn over
+        the non-significant cells; 0 disables the fade
+    - contour_color: str -> colour of the outline around significant cells
+    - contour_linewidth: float -> width of that outline
+    - **matrix_kwargs -> style options passed to plot_static_dynamic_matrix
+
+OUTPUT:
+    - image: matplotlib.image.AxesImage -> drawn matrix image
+"""
+def plot_significance_masked_matrix(
+        axis,
+        matrix: np.ndarray,
+        significant: np.ndarray,
+        bin_ms: float,
+        nonsignificant_blur_sigma: float = 2,
+        nonsignificant_fade_alpha: float = 0.5,
+        contour_color: str = "white",
+        contour_linewidth: float = 2,
+        **matrix_kwargs,
+        ):
+    matrix = np.asarray(matrix, dtype=np.float64)
+    significant = np.asarray(significant, dtype=bool)
+    if significant.shape != matrix.shape:
+        raise ValueError("significant must match matrix in shape.")
+    # end if shapes differ
+
+    # Blur only what is shown outside the significant region.
+    displayed = matrix.copy()
+    if nonsignificant_blur_sigma > 0:
+        blurred = gaussian_filter(
+            np.nan_to_num(matrix, nan=np.nanmean(matrix)),
+            sigma=nonsignificant_blur_sigma,
+        )
+        displayed = np.where(significant, matrix, blurred)
+    # end if blur requested
+    image = plot_static_dynamic_matrix(
+        axis, displayed, bin_ms, **matrix_kwargs,
+    )
+
+    # Same extent as plot_static_dynamic_matrix: bin i spans [i, i + 1) * bin_ms.
+    extent = (0, matrix.shape[0] * bin_ms, 0, matrix.shape[1] * bin_ms)
+    if nonsignificant_fade_alpha > 0:
+        # White RGBA veil, transparent over the significant cells.
+        veil = np.ones(matrix.T.shape + (4,))
+        veil[..., 3] = np.where(significant.T, 0, nonsignificant_fade_alpha)
+        axis.imshow(veil, aspect="auto", origin="lower", extent=extent)
+    # end if fade requested
+    if significant.any() and not significant.all():
+        # Contour through bin centres outlines the significant region.
+        dynamic_centres_ms = (np.arange(matrix.shape[0]) + 0.5) * bin_ms
+        static_centres_ms = (np.arange(matrix.shape[1]) + 0.5) * bin_ms
+        axis.contour(
+            dynamic_centres_ms, static_centres_ms, significant.T.astype(float),
+            levels=[0.5], colors=contour_color, linewidths=contour_linewidth,
+        )
+    # end if the mask has a boundary
+    return image
 # EOF

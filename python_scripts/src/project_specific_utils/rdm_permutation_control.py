@@ -17,8 +17,12 @@ than carried by the neural data.
 
 from pathlib import Path
 
+from joblib import Parallel, delayed
 import numpy as np
+from scipy.ndimage import label, sum_labels
 from scipy.spatial.distance import squareform
+from scipy.stats import rankdata
+from threadpoolctl import threadpool_limits
 
 from image_processing.video_feature_extraction import (
     load_aligned_video_features,
@@ -245,4 +249,255 @@ def latency_profile_smoothness(latencies_ms) -> dict:
             adjacent_step_ms / range_ms if range_ms > 0 else np.nan
         ),
     }
+# EOF
+
+
+"""
+condensed_permutation_index
+Map one stimulus permutation onto the condensed RDM entries it moves.
+
+Indexing a condensed RDM with this array is identical to squareform -> reorder
+rows and columns with the permutation -> squareform (permute_rdm_entries), but
+it applies to every timepoint of an RDM timeseries in a single gather.
+
+INPUT:
+    - n_stimuli: int -> number of stimuli in the RDM
+    - permutation: np.ndarray (n_stimuli,) -> new stimulus order
+
+OUTPUT:
+    - condensed_index: np.ndarray (n*(n-1)/2,) -> source entry of every entry
+"""
+def condensed_permutation_index(n_stimuli: int, permutation) -> np.ndarray:
+    upper_rows, upper_cols = np.triu_indices(n_stimuli, k=1)
+    square_index = np.zeros((n_stimuli, n_stimuli), dtype=int)
+    square_index[upper_rows, upper_cols] = np.arange(len(upper_rows))
+    square_index += square_index.T
+    permutation = np.asarray(permutation, dtype=int)
+    return square_index[permutation[upper_rows], permutation[upper_cols]]
+# EOF
+
+
+"""
+standardize_rdm_rows
+Rank (for Spearman), center and unit-normalize every RDM, so that a matrix
+product of two standardized RDM sets gives their correlations. Relabelling the
+stimuli only reorders the entries, so this runs once, outside the permutations.
+
+INPUT:
+    - rdms: np.ndarray -> time x stimulus-pair distances
+    - metric: str -> correlation or spearman
+
+OUTPUT:
+    - standardized_rdms: np.ndarray -> time x stimulus pairs, unit-norm rows
+"""
+def standardize_rdm_rows(rdms: np.ndarray, metric: str) -> np.ndarray:
+    rdms = np.asarray(rdms, dtype=np.float64)
+    if metric == "spearman":
+        rdms = rankdata(rdms, axis=1)
+    elif metric != "correlation":
+        raise ValueError("metric must be 'correlation' or 'spearman'.")
+    # end if metric
+    rdms = rdms - rdms.mean(axis=1, keepdims=True)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        # Constant RDMs (e.g. silent bins) have no norm and become NaN rows.
+        return rdms / np.linalg.norm(rdms, axis=1, keepdims=True)
+    # end with np.errstate
+# EOF
+
+
+"""
+permutation_chunk
+Draw a block of stimulus permutations and compute each null similarity matrix.
+Runs inside one worker, with BLAS limited to a single thread when parallel.
+
+INPUT:
+    - fixed_rdms: np.ndarray -> standardized fixed time x stimulus pairs
+    - permuted_rdms: np.ndarray -> standardized relabelled time x stimulus pairs
+    - n_permutations: int -> permutations drawn by this worker
+    - seed: np.random.SeedSequence -> independent seed of this worker
+    - single_thread: bool -> limit BLAS to one thread
+
+OUTPUT:
+    - null: np.ndarray (n_permutations, fixed time, permuted time) float32
+"""
+def permutation_chunk(fixed_rdms, permuted_rdms, n_permutations, seed, single_thread):
+    rng = np.random.default_rng(seed)
+    n_stimuli = int(round((1 + np.sqrt(1 + 8 * permuted_rdms.shape[1])) / 2))
+    null = np.empty(
+        (n_permutations, fixed_rdms.shape[0], permuted_rdms.shape[0]),
+        dtype=np.float32,
+    )
+    with threadpool_limits(1 if single_thread else None):
+        for permutation_index in range(n_permutations):
+            condensed_index = condensed_permutation_index(
+                n_stimuli, rng.permutation(n_stimuli),
+            )
+            null[permutation_index] = fixed_rdms @ permuted_rdms[:, condensed_index].T
+        # end for permutation_index
+    # end with threadpool_limits
+    return null
+# EOF
+
+
+"""
+permuted_cross_temporal_similarity
+Cross-temporal RDM similarity (as cross_temporal_similarity) plus its null
+distribution from relabelling the stimuli of the second RDM timeseries. Every
+permutation is shared by all timepoints, so the temporal structure of both
+RDM timeseries is preserved and only the stimulus correspondence is broken.
+
+INPUT:
+    - fixed_rdms: np.ndarray -> first time x stimulus pairs, kept untouched
+    - permuted_rdms: np.ndarray -> second time x stimulus pairs, relabelled
+    - n_permutations: int -> number of stimulus permutations
+    - metric: str -> correlation or spearman
+    - random_seed: int -> seed of the permutation generator
+    - n_jobs: int -> parallel workers (1 = serial with multithreaded BLAS)
+
+OUTPUT:
+    - observed: np.ndarray -> first time x second time similarity
+    - null: np.ndarray (n_permutations, first time, second time) float32
+"""
+def permuted_cross_temporal_similarity(
+        fixed_rdms: np.ndarray,
+        permuted_rdms: np.ndarray,
+        n_permutations: int = 1000,
+        metric: str = "spearman",
+        random_seed: int = 0,
+        n_jobs: int = 1,
+        ) -> tuple[np.ndarray, np.ndarray]:
+    if fixed_rdms.ndim != 2 or fixed_rdms.shape[1] != permuted_rdms.shape[1]:
+        raise ValueError("Inputs must be time x matching stimulus-pair matrices.")
+    # end if input shapes
+    fixed_rdms = standardize_rdm_rows(fixed_rdms, metric)
+    permuted_rdms = standardize_rdm_rows(permuted_rdms, metric)
+    observed = np.clip(fixed_rdms @ permuted_rdms.T, -1, 1)
+
+    worker_sizes = [
+        len(chunk) for chunk in np.array_split(np.arange(n_permutations), n_jobs)
+    ]
+    worker_seeds = np.random.SeedSequence(random_seed).spawn(n_jobs)
+    null_chunks = Parallel(n_jobs=n_jobs)(
+        delayed(permutation_chunk)(
+            fixed_rdms, permuted_rdms, worker_size, worker_seed, n_jobs > 1,
+        )
+        for worker_size, worker_seed in zip(worker_sizes, worker_seeds)
+    )
+    return observed, np.clip(np.concatenate(null_chunks), -1, 1)
+# EOF
+
+
+"""
+permutation_p_values
+One-sided (observed > null) permutation p-values for every cell of a
+similarity matrix, uncorrected and family-wise corrected with the maximum
+statistic over the whole matrix.
+
+INPUT:
+    - observed: np.ndarray -> first time x second time similarity
+    - null: np.ndarray -> permutations x first time x second time
+
+OUTPUT:
+    - p_values: dict -> pointwise and max_statistic p maps, null maxima
+"""
+def permutation_p_values(observed: np.ndarray, null: np.ndarray) -> dict:
+    n_permutations = null.shape[0]
+    null_max = np.nanmax(null.reshape(n_permutations, -1), axis=1)
+    pointwise = (1 + (null >= observed).sum(axis=0)) / (1 + n_permutations)
+    max_statistic = (
+        (1 + (null_max[:, None, None] >= observed).sum(axis=0))
+        / (1 + n_permutations)
+    )
+    # NaN cells compare False against every null value; keep them undefined.
+    undefined = ~np.isfinite(observed)
+    pointwise[undefined] = np.nan
+    max_statistic[undefined] = np.nan
+    return {
+        "pointwise": pointwise,
+        "max_statistic": max_statistic,
+        "null_max": null_max,
+    }
+# EOF
+
+
+"""
+cluster_permutation_test
+Cluster-mass permutation test on a similarity matrix. Cells above the
+pointwise (1 - cluster_alpha) null percentile form clusters (4-connectivity),
+each cluster's mass is the sum of its similarities, and every observed cluster
+is compared with the largest cluster mass of every null matrix.
+
+INPUT:
+    - observed: np.ndarray -> first time x second time similarity
+    - null: np.ndarray -> permutations x first time x second time
+    - cluster_alpha: float -> pointwise cluster-forming threshold
+
+OUTPUT:
+    - clusters: dict -> labels map, masses, p_values, null_max_mass, threshold
+"""
+def cluster_permutation_test(
+        observed: np.ndarray,
+        null: np.ndarray,
+        cluster_alpha: float = 0.05,
+        ) -> dict:
+    threshold = np.nanpercentile(null, 100 * (1 - cluster_alpha), axis=0)
+
+    def cluster_masses(similarity):
+        labels, n_clusters = label(np.nan_to_num(similarity > threshold))
+        masses = sum_labels(similarity, labels, index=np.arange(1, n_clusters + 1))
+        return labels, np.asarray(masses, dtype=float)
+    # EOF
+
+    labels, masses = cluster_masses(observed)
+    null_max_mass = np.asarray([
+        max(cluster_masses(null_matrix)[1], default=0.0) for null_matrix in null
+    ])
+    p_values = (
+        (1 + (null_max_mass[:, None] >= masses[None, :]).sum(axis=0))
+        / (1 + len(null_max_mass))
+    )
+    return {
+        "labels": labels,
+        "masses": masses,
+        "p_values": p_values,
+        "null_max_mass": null_max_mass,
+        "threshold": threshold,
+    }
+# EOF
+
+
+"""
+permutation_significance_mask
+Boolean map of the significant cells of a saved permutation result, for one
+of the three corrections computed by static_dynamic_drsa_permutation.ipynb.
+
+INPUT:
+    - permutation_result: dict | NpzFile -> saved archive with pointwise_p,
+        max_statistic_p, cluster_labels and cluster_p
+    - correction: str -> "pointwise" (uncorrected), "max_statistic" (FWE over
+        the whole matrix) or "cluster" (cluster-mass)
+    - alpha: float -> significance level
+
+OUTPUT:
+    - significant: np.ndarray -> first time x second time boolean mask
+"""
+def permutation_significance_mask(
+        permutation_result,
+        correction: str = "cluster",
+        alpha: float = 0.05,
+        ) -> np.ndarray:
+    if correction == "pointwise":
+        return permutation_result["pointwise_p"] < alpha
+    elif correction == "max_statistic":
+        return permutation_result["max_statistic_p"] < alpha
+    elif correction == "cluster":
+        # Cluster labels are 1-based; label 0 marks cells outside every cluster.
+        significant_labels = (
+            np.flatnonzero(permutation_result["cluster_p"] < alpha) + 1
+        )
+        return np.isin(permutation_result["cluster_labels"], significant_labels)
+    # end if correction
+    raise ValueError(
+        "correction must be 'pointwise', 'max_statistic', or 'cluster'."
+    )
 # EOF

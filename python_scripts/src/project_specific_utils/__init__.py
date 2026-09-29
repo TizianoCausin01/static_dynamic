@@ -28,6 +28,8 @@ __all__ = [
     'compute_cross_temporal_manifold_dynamics',
     'compute_cross_temporal_pc_rotation', 'compute_drsa_autocorrelation',
     'compute_manifold_dynamics', 'compute_pc_subspaces',
+    'plot_static_dynamic_drsa_peak', 'regress_out_rdm_timeseries',
+    'static_dynamic_drsa_peak',
     'population_response_scores', 'select_manifold_subsets',
     'analysis_timecourses', 'layer_depth_temporal_score',
     'load_model_layer_rsa', 'rdm_noise_ceiling', 'summarize_model_analysis',
@@ -39,7 +41,19 @@ __all__ = [
     'save_layer_neural_model_rsa',
     'latency_profile_smoothness', 'permute_rdm_entries',
     'permuted_static_rsa', 'prepare_static_neural_rdms',
-    'static_model_rdms_by_layer',
+    'static_model_rdms_by_layer', 'cluster_permutation_test',
+    'condensed_permutation_index', 'permutation_p_values',
+    'permuted_cross_temporal_similarity', 'standardize_rdm_rows',
+    'compare_static_dynamic_tails', 'plot_static_dynamic_bars',
+    'cross_temporal_tail_ttest', 'plot_static_dynamic_matrix',
+    'rdm_tail_timecourses', 'select_tail_indices', 'select_tail_values',
+    'depth_latency_score', 'last_frame_residual_similarity',
+    'regress_out_rdm', 'summarize_layer_timing',
+    'pooled_static_regress_out', 'timepoint_static_regress_out',
+    'window_model_timecourses', 'window_patterns',
+    'window_static_regress_out',
+    'model_frame_similarity_by_layer', 'permutation_significance_mask',
+    'plot_significance_masked_matrix', 'regressed_static_dynamic_drsa',
 ]
 
 from .channel_reliability import (
@@ -86,6 +100,10 @@ from .manifold_dynamics import (
     compute_cross_temporal_pc_rotation, compute_drsa_autocorrelation,
     compute_manifold_dynamics, compute_pc_subspaces,
     population_response_scores, select_manifold_subsets,
+    plot_significance_masked_matrix,
+    plot_static_dynamic_drsa_peak, plot_static_dynamic_matrix,
+    regress_out_rdm_timeseries,
+    static_dynamic_drsa_peak,
 )
 from .neural_model_rsa import (
     build_neural_model_rsa_filename, compute_layer_neural_model_rsa,
@@ -97,9 +115,25 @@ from .neural_model_rsa import (
 from .rdm_permutation_control import (
     latency_profile_smoothness, permute_rdm_entries, permuted_static_rsa,
     prepare_static_neural_rdms, static_model_rdms_by_layer,
+    cluster_permutation_test, condensed_permutation_index,
+    permutation_p_values, permutation_significance_mask,
+    permuted_cross_temporal_similarity, standardize_rdm_rows,
 )
 from .model_hierarchy_latency import (
     analysis_timecourses, layer_depth_temporal_score,
     load_model_layer_rsa, rdm_noise_ceiling, summarize_model_analysis,
     timecourse_latency,
+)
+from .static_dynamic_magnitude import (
+    compare_static_dynamic_tails, cross_temporal_tail_ttest,
+    plot_static_dynamic_bars, rdm_tail_timecourses,
+    select_tail_indices, select_tail_values,
+)
+from .last_frame_residual_hierarchy import (
+    depth_latency_score, last_frame_residual_similarity,
+    model_frame_similarity_by_layer, regress_out_rdm, summarize_layer_timing,
+)
+from .static_response_regress_out import (
+    pooled_static_regress_out, regressed_static_dynamic_drsa,
+    timepoint_static_regress_out, window_model_timecourses, window_patterns, window_static_regress_out,
 )
