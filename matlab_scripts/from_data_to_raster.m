@@ -652,6 +652,8 @@ end % EOF
 %{
 get_stimulus_name
 Removes any directory component so repeated stimuli match by file identity.
+Copies saved with a space-separated suffix (e.g. 'vid_IMG_47051 -b.mp4')
+are mapped back to the original stimulus ('vid_IMG_47051.mp4').
 
 INPUT:
     - filename: char|string -> stimulus path or filename.
@@ -662,6 +664,8 @@ OUTPUT:
 function stimulus_name = get_stimulus_name(filename)
 
     [~, stem, extension] = fileparts(char(filename));
+    % Drop everything from the first space up to the extension.
+    stem = regexprep(stem, ' .*$', '');
     stimulus_name = [stem, extension];
 
 end % EOF
