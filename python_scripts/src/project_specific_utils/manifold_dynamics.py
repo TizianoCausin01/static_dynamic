@@ -1,6 +1,9 @@
+from matplotlib.collections import LineCollection
 import matplotlib.pyplot as plt
 from matplotlib.colors import to_rgb
+from matplotlib.lines import Line2D
 import numpy as np
+from scipy.interpolate import CubicSpline
 from scipy.ndimage import gaussian_filter
 
 from .channelwise_correlation import channelwise_regress_out
@@ -816,4 +819,165 @@ def plot_significance_masked_matrix(
         )
     # end if the mask has a boundary
     return image
+# EOF
+
+
+"""
+plot_gradient_trajectory_2d
+Draw a 2D trajectory as a line whose colour follows time. The trajectory is
+cubic-spline interpolated in time so both the curve and the colour gradient
+look continuous. A dotted line is drawn by keeping alternating stretches of
+equal arc length, measured in axis-fraction units; set the axis limits
+before calling so the dots have a uniform size.
+
+INPUT:
+    - axis: matplotlib.axes.Axes -> axis to draw on
+    - scores: np.ndarray -> (time, 2) trajectory coordinates
+    - times_s: np.ndarray -> (time,) time of each sample, mapped to colour
+    - cmap: str -> colormap name
+    - norm: matplotlib.colors.Normalize -> time-to-colour normalization
+    - upsample: int -> interpolated points per original sample interval
+    - linewidth: float -> line width
+    - alpha: float -> line opacity
+    - dotted: bool -> draw a dotted instead of a solid line
+    - dot_length: float -> length of each dot as a fraction of the axis
+    - gap_length: float -> length of each gap as a fraction of the axis
+    - outline_color: str | None -> colour of an outline drawn under the line;
+        None draws no outline
+    - outline_width: float -> outline thickness added on each side of the line
+    - zorder: float -> drawing order
+
+OUTPUT:
+    - collection: matplotlib.collections.LineCollection -> drawn line, usable
+        as the colorbar mappable
+"""
+def plot_gradient_trajectory_2d(
+        axis,
+        scores: np.ndarray,
+        times_s: np.ndarray,
+        cmap: str,
+        norm,
+        upsample: int = 10,
+        linewidth: float = 2,
+        alpha: float = 1,
+        dotted: bool = False,
+        dot_length: float = 0.008,
+        gap_length: float = 0.015,
+        outline_color: str | None = None,
+        outline_width: float = 1,
+        zorder: float = 1,
+        ):
+    # Cubic spline through the samples gives a smooth (fine_time, 2) curve.
+    fine_times_s = np.linspace(
+        times_s[0], times_s[-1], (len(times_s) - 1) * upsample + 1,
+    )
+    fine_scores = CubicSpline(times_s, scores, axis=0)(fine_times_s)
+
+    # Segment k joins points k and k + 1 and takes its midpoint time's colour.
+    segments = np.stack([fine_scores[:-1], fine_scores[1:]], axis=1)
+    segment_times_s = (fine_times_s[:-1] + fine_times_s[1:]) / 2
+
+    if dotted:
+        # Measure arc length in axis fractions, so dots look the same on x and y.
+        axis_span = np.array([np.ptp(axis.get_xlim()), np.ptp(axis.get_ylim())])
+        steps = np.diff(fine_scores, axis=0) / axis_span
+        segment_lengths = np.linalg.norm(steps, axis=1)
+        midpoint_arc = np.cumsum(segment_lengths) - segment_lengths / 2
+        # Repeat dot, gap, dot, ... along the arc; keep only the dot stretches.
+        keep = midpoint_arc % (dot_length + gap_length) < dot_length
+        segments = segments[keep]
+        segment_times_s = segment_times_s[keep]
+    # end if dotted
+
+    if outline_color is not None:
+        # One wider single-colour line underneath, so the outline never covers
+        # neighbouring segments (per-segment path effects would).
+        axis.add_collection(LineCollection(
+            segments, colors=outline_color, alpha=alpha, capstyle="round",
+            linewidth=linewidth + 2 * outline_width, zorder=zorder - 0.1,
+        ))
+    # end if outline_color
+
+    collection = LineCollection(
+        segments, cmap=cmap, norm=norm, linewidth=linewidth, alpha=alpha,
+        capstyle="round", zorder=zorder,
+    )
+    collection.set_array(segment_times_s)
+    axis.add_collection(collection)
+    return collection
+# EOF
+
+
+"""
+plot_static_movie_trajectories_2d
+Draw the PC1-PC2 stimulus-average trajectories of the static image (solid)
+and the movie (dotted), both coloured by movie-aligned time, fit the axis
+limits to them and add a legend.
+
+INPUT:
+    - axis: matplotlib.axes.Axes -> axis to draw on
+    - static_scores: np.ndarray -> (static time, components) PCA scores
+    - movie_scores: np.ndarray -> (movie time, components) PCA scores
+    - static_color_times: np.ndarray -> (static time,) movie-aligned time of
+        every static sample, mapped to colour
+    - movie_color_times: np.ndarray -> (movie time,) time of every movie sample
+    - cmap: str -> colormap name
+    - norm: matplotlib.colors.Normalize -> time-to-colour normalization
+    - linewidth: float -> trajectory line width
+    - upsample: int -> cubic-spline points per sample interval
+    - dot_length: float -> movie dot length as a fraction of the axis
+    - gap_length: float -> movie gap length as a fraction of the axis
+    - static_label: str -> legend label of the static trajectory
+    - movie_label: str -> legend label of the movie trajectory
+    - legend_fontsize: float | None -> legend font size; None = default
+    - legend_kwargs: dict | None -> extra axis.legend options (e.g. loc,
+        bbox_to_anchor, ncol); None = matplotlib defaults
+
+OUTPUT:
+    - collection: matplotlib.collections.LineCollection -> movie line, usable
+        as the colorbar mappable
+"""
+def plot_static_movie_trajectories_2d(
+        axis,
+        static_scores: np.ndarray,
+        movie_scores: np.ndarray,
+        static_color_times: np.ndarray,
+        movie_color_times: np.ndarray,
+        cmap: str,
+        norm,
+        linewidth: float = 3.5,
+        upsample: int = 10,
+        dot_length: float = 0.008,
+        gap_length: float = 0.015,
+        static_label: str = "static",
+        movie_label: str = "movie",
+        legend_fontsize: float | None = None,
+        legend_kwargs: dict | None = None,
+        ):
+    # Set limits first: the dotted line measures its dots in axis fractions.
+    all_xy = np.vstack([static_scores[:, :2], movie_scores[:, :2]])
+    lower, upper = all_xy.min(axis=0), all_xy.max(axis=0)
+    margin = 0.05 * (upper - lower)
+    axis.set_xlim(lower[0] - margin[0], upper[0] + margin[0])
+    axis.set_ylim(lower[1] - margin[1], upper[1] + margin[1])
+
+    for scores, color_times, dotted in (
+            (static_scores, static_color_times, False),
+            (movie_scores, movie_color_times, True),
+            ):
+        # Dark outline keeps the light end of the colormap visible on white.
+        collection = plot_gradient_trajectory_2d(
+            axis, scores[:, :2], color_times, cmap, norm,
+            upsample=upsample, linewidth=linewidth, dotted=dotted,
+            dot_length=dot_length, gap_length=gap_length,
+            outline_color="black", outline_width=1,
+        )
+    # end for scores, color_times
+
+    # Line collections have no legend entry, so use grey proxy lines.
+    axis.legend(handles=[
+        Line2D([], [], color="grey", linewidth=2.5, label=static_label),
+        Line2D([], [], color="grey", linewidth=2.5, linestyle=":", label=movie_label),
+    ], fontsize=legend_fontsize, **(legend_kwargs or {}))
+    return collection
 # EOF
