@@ -83,6 +83,8 @@ Compute smoothed curves plus centroid and peak latency for every model layer.
 
 Curves are smoothed along neural time, then values at or below the cutoff
 (including all negative values) receive zero weight inside each window.
+Centroids and peaks can use different smoothing; a sigma of 0 leaves the
+curves unsmoothed.
 
 INPUT:
     - similarity: np.ndarray -> layers x dynamic-neural-time RSA values.
@@ -90,23 +92,45 @@ INPUT:
     - frame_onset_ms: float -> latencies are expressed relative to this time.
     - centroid_window_ms: tuple[float, float] -> end-exclusive centroid window.
     - peak_window_ms: tuple[float, float] -> end-exclusive peak window.
-    - smoothing_sigma: float -> Gaussian sigma in samples.
+    - smoothing_sigma: float -> Gaussian sigma in samples for the returned
+        curves and the centroid latency (0 = no smoothing).
     - centroid_cutoff: float -> minimum RSA carrying centroid weight.
     - peak_cutoff: float -> minimum RSA eligible as a peak.
+    - peak_smoothing_sigma: float | None -> Gaussian sigma in samples for the
+        peak latency (0 = no smoothing); None reuses smoothing_sigma.
+    - relative_cutoffs: bool -> if True, centroid_cutoff and peak_cutoff are
+        fractions of the maximum smoothed RSA over all layers inside the
+        centroid and peak window; a layer never exceeding the cutoff gets NaN.
 
 OUTPUT:
-    - smoothed_similarity: np.ndarray -> curves used for timing summaries.
+    - smoothed_similarity: np.ndarray -> curves smoothed with smoothing_sigma.
     - centroid_latency_ms: np.ndarray -> positive-mass centroid minus onset.
     - peak_latency_ms: np.ndarray -> positive peak time minus onset.
-    - peak_similarity: np.ndarray -> smoothed peak RSA inside the peak window.
+    - peak_similarity: np.ndarray -> peak RSA inside the peak window, smoothed
+        with peak_smoothing_sigma.
 """
 def summarize_layer_timing(
         similarity, time_ms, frame_onset_ms, centroid_window_ms,
         peak_window_ms, smoothing_sigma, centroid_cutoff, peak_cutoff,
+        peak_smoothing_sigma=None, relative_cutoffs=False,
         ):
-    smoothed_similarity = gaussian_filter1d(
-        similarity, sigma=smoothing_sigma, axis=1,
-    )
+    if peak_smoothing_sigma is None:
+        peak_smoothing_sigma = smoothing_sigma
+    # end if peak smoothing not given
+    if smoothing_sigma < 0 or peak_smoothing_sigma < 0:
+        raise ValueError("Smoothing sigmas must be non-negative.")
+    # end if negative sigma
+    # layers x time curves for the centroid (and plotting) and for the peak.
+    smoothed_similarity = np.asarray(similarity, dtype=float)
+    if smoothing_sigma > 0:
+        smoothed_similarity = gaussian_filter1d(similarity, sigma=smoothing_sigma, axis=1)
+    # end if centroid smoothing
+    peak_smoothed_similarity = np.asarray(similarity, dtype=float)
+    if peak_smoothing_sigma > 0:
+        peak_smoothed_similarity = gaussian_filter1d(
+            similarity, sigma=peak_smoothing_sigma, axis=1,
+        )
+    # end if peak smoothing
     centroid_mask = (
         (time_ms >= centroid_window_ms[0]) & (time_ms < centroid_window_ms[1])
     )
@@ -115,11 +139,23 @@ def summarize_layer_timing(
         raise ValueError("Timing windows contain no neural samples.")
     # end if a timing window is empty
 
+    if relative_cutoffs:
+        # Cutoffs become fractions of the largest value over all layers inside
+        # each window, so layers are kept relative to the best-fitting layer.
+        # Clamped at 0 so negative RSA never carries weight when no layer fits.
+        centroid_cutoff = max(
+            0.0, centroid_cutoff * np.nanmax(smoothed_similarity[:, centroid_mask]),
+        )
+        peak_cutoff = max(
+            0.0, peak_cutoff * np.nanmax(peak_smoothed_similarity[:, peak_mask]),
+        )
+    # end if relative_cutoffs
+
     n_layers = smoothed_similarity.shape[0]
     centroid_latency_ms = np.full(n_layers, np.nan)
     peak_latency_ms = np.full(n_layers, np.nan)
-    for layer_index, layer_curve in enumerate(smoothed_similarity):
-        centroid_curve = layer_curve[centroid_mask]
+    for layer_index in range(n_layers):
+        centroid_curve = smoothed_similarity[layer_index, centroid_mask]
         centroid_weights = np.where(
             np.isfinite(centroid_curve) & (centroid_curve > centroid_cutoff),
             centroid_curve, 0,
@@ -130,7 +166,7 @@ def summarize_layer_timing(
             ) - frame_onset_ms
         # end if centroid mass exists
 
-        peak_curve = layer_curve[peak_mask]
+        peak_curve = peak_smoothed_similarity[layer_index, peak_mask]
         peak_values = np.where(
             np.isfinite(peak_curve) & (peak_curve > peak_cutoff),
             peak_curve, 0,
@@ -140,8 +176,8 @@ def summarize_layer_timing(
                 time_ms[peak_mask][np.argmax(peak_values)] - frame_onset_ms
             )
         # end if positive peak exists
-    # end for layer_index, layer_curve
-    peak_similarity = np.nanmax(smoothed_similarity[:, peak_mask], axis=1)
+    # end for layer_index
+    peak_similarity = np.nanmax(peak_smoothed_similarity[:, peak_mask], axis=1)
     return (
         smoothed_similarity, centroid_latency_ms, peak_latency_ms,
         peak_similarity,

@@ -54,6 +54,8 @@ __all__ = [
     'window_static_regress_out',
     'model_frame_similarity_by_layer', 'permutation_significance_mask',
     'plot_significance_masked_matrix', 'regressed_static_dynamic_drsa',
+    'remove_small_significant_regions', 'regress_out_static_response',
+    'regressed_condition_suffix', 'previous_response_rasters',
 ]
 
 from .channel_reliability import (
@@ -85,6 +87,7 @@ from .split_half_rsa import (
 )
 from .tuning_curves import (
     bootstrap_rowwise_orthogonal_slopes, rowwise_orthogonal_regression,
+    split_half_tuning_reliability, tuning_noise_ceiling,
     window_mean_responses, window_peak_responses,
     window_smoothed_response_latencies,
 )
@@ -117,7 +120,8 @@ from .rdm_permutation_control import (
     prepare_static_neural_rdms, static_model_rdms_by_layer,
     cluster_permutation_test, condensed_permutation_index,
     permutation_p_values, permutation_significance_mask,
-    permuted_cross_temporal_similarity, standardize_rdm_rows,
+    permuted_cross_temporal_similarity, remove_small_significant_regions,
+    standardize_rdm_rows,
 )
 from .model_hierarchy_latency import (
     analysis_timecourses, layer_depth_temporal_score,
@@ -134,6 +138,8 @@ from .last_frame_residual_hierarchy import (
     model_frame_similarity_by_layer, regress_out_rdm, summarize_layer_timing,
 )
 from .static_response_regress_out import (
-    pooled_static_regress_out, regressed_static_dynamic_drsa,
+    pooled_static_regress_out, previous_response_rasters,
+    regress_out_static_response,
+    regressed_condition_suffix, regressed_static_dynamic_drsa,
     timepoint_static_regress_out, window_model_timecourses, window_patterns, window_static_regress_out,
 )

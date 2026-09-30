@@ -1,4 +1,5 @@
 import matplotlib.pyplot as plt
+from matplotlib.colors import to_rgb
 import numpy as np
 from scipy.ndimage import gaussian_filter
 
@@ -743,7 +744,9 @@ def plot_static_dynamic_drsa_peak(
 """
 plot_significance_masked_matrix
 Draw a static-dynamic matrix with plot_static_dynamic_matrix, keeping the
-significant cells sharp and outlined while the rest is blurred and faded.
+significant cells sharp and outlined while the rest is blurred and dimmed.
+Dimming blends the non-significant cells' colours toward dim_color, so their
+values stay readable.
 
 INPUT:
     - axis: matplotlib.axes.Axes -> axis to draw on
@@ -752,8 +755,10 @@ INPUT:
     - bin_ms: float -> duration of one matrix bin in ms
     - nonsignificant_blur_sigma: float -> Gaussian sigma (bins) applied to the
         non-significant cells; 0 disables the blur
-    - nonsignificant_fade_alpha: float -> opacity of the white veil drawn over
-        the non-significant cells; 0 disables the fade
+    - nonsignificant_dim_alpha: float -> opacity of the dim_color veil drawn
+        over the non-significant cells; 0 disables the dimming
+    - nonsignificant_dim_color: str -> colour the non-significant cells are
+        blended toward ("black" darkens them)
     - contour_color: str -> colour of the outline around significant cells
     - contour_linewidth: float -> width of that outline
     - **matrix_kwargs -> style options passed to plot_static_dynamic_matrix
@@ -767,7 +772,8 @@ def plot_significance_masked_matrix(
         significant: np.ndarray,
         bin_ms: float,
         nonsignificant_blur_sigma: float = 2,
-        nonsignificant_fade_alpha: float = 0.5,
+        nonsignificant_dim_alpha: float = 0.4,
+        nonsignificant_dim_color: str = "black",
         contour_color: str = "white",
         contour_linewidth: float = 2,
         **matrix_kwargs,
@@ -793,12 +799,13 @@ def plot_significance_masked_matrix(
 
     # Same extent as plot_static_dynamic_matrix: bin i spans [i, i + 1) * bin_ms.
     extent = (0, matrix.shape[0] * bin_ms, 0, matrix.shape[1] * bin_ms)
-    if nonsignificant_fade_alpha > 0:
-        # White RGBA veil, transparent over the significant cells.
-        veil = np.ones(matrix.T.shape + (4,))
-        veil[..., 3] = np.where(significant.T, 0, nonsignificant_fade_alpha)
+    if nonsignificant_dim_alpha > 0:
+        # RGBA veil of dim_color, transparent over the significant cells.
+        veil = np.zeros(matrix.T.shape + (4,))
+        veil[..., :3] = to_rgb(nonsignificant_dim_color)
+        veil[..., 3] = np.where(significant.T, 0, nonsignificant_dim_alpha)
         axis.imshow(veil, aspect="auto", origin="lower", extent=extent)
-    # end if fade requested
+    # end if dimming requested
     if significant.any() and not significant.all():
         # Contour through bin centres outlines the significant region.
         dynamic_centres_ms = (np.arange(matrix.shape[0]) + 0.5) * bin_ms

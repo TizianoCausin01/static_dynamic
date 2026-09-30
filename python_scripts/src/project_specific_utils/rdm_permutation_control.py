@@ -501,3 +501,34 @@ def permutation_significance_mask(
         "correction must be 'pointwise', 'max_statistic', or 'cluster'."
     )
 # EOF
+
+
+"""
+remove_small_significant_regions
+Drop connected significant regions smaller than a minimum number of cells.
+Regions use the same 4-connectivity as cluster_permutation_test. Cells are
+only ever removed, never added, so the result is at most as liberal as the
+input mask; holes inside a region are left untouched.
+
+INPUT:
+    - significant: np.ndarray -> first time x second time boolean mask
+    - min_region_cells: int -> smallest region kept; 0 or 1 keeps everything
+
+OUTPUT:
+    - cleaned: np.ndarray -> boolean mask without the small regions
+"""
+def remove_small_significant_regions(
+        significant: np.ndarray,
+        min_region_cells: int = 0,
+        ) -> np.ndarray:
+    significant = np.asarray(significant, dtype=bool)
+    if min_region_cells <= 1:
+        return significant
+    # end if nothing to remove
+    labels, n_regions = label(significant)
+    # Cell count of every region; index 0 is the non-significant background.
+    region_sizes = np.bincount(labels.ravel(), minlength=n_regions + 1)
+    kept_regions = np.flatnonzero(region_sizes >= min_region_cells)
+    kept_regions = kept_regions[kept_regions > 0]
+    return np.isin(labels, kept_regions)
+# EOF

@@ -1,3 +1,5 @@
+from collections import Counter
+
 import matplotlib.pyplot as plt
 import numpy as np
 from scipy.spatial.distance import squareform
@@ -9,7 +11,7 @@ from useful_stuff.general_utils import create_RDM
 from .dataloader import load_raster
 from .frame_similarity_latency import half_open_window_mean
 from .last_frame_decay import resample_array
-from .split_half_rsa import average_repetition_halves
+from .split_half_rsa import average_repetition_halves, compute_split_half_reliability
 
 
 """
@@ -252,6 +254,90 @@ def load_dynamic_presentations(
     presentations = resample_array(presentations[:, :, keep], source_fs, data["neural_fs"])
     identities = [identity for identity, kept in zip(identities, keep) if kept]
     return presentations, identities
+# EOF
+
+
+"""
+load_or_compute_movie_split_half_reliability
+Split-half reliability of the movie RDM at every movie bin, cached on disk.
+The presentation-level raster (tens of GB for Neuropixels) is read only when
+no cached result matches the requested channels, stimuli and settings. The
+cache keeps the uncorrected correlations, so any Spearman-Brown correction is
+applied by the caller.
+
+INPUT:
+    - cache_path: str | Path -> .npz file holding (or receiving) the result
+    - dynamic_raster_path: str | Path -> presentation-level movie raster file
+    - channel_numbers: np.ndarray -> one-based MATLAB channels to keep
+    - stimuli: list[str] -> candidate stimuli; those with >= 2 repetitions are used
+    - neural_fs: float -> analysis sampling frequency in Hz
+    - end_ms: float -> last movie time loaded
+    - source_fs: float -> neural source sampling frequency in Hz
+    - n_split_repeats: int -> number of random repetition splits
+    - seed: int -> split random seed
+    - rdm_metric: str -> neural RDM metric
+    - rsa_metric: str -> half-vs-half RDM similarity metric
+
+OUTPUT:
+    - reliability_splits: np.ndarray -> splits x movie time uncorrected RDM correlations
+    - reliability_stimuli: list[str] -> stimuli with at least two repetitions
+    - n_presentations: int -> presentations of the candidate stimuli
+"""
+def load_or_compute_movie_split_half_reliability(
+        cache_path, dynamic_raster_path, channel_numbers, stimuli, neural_fs,
+        end_ms, source_fs, n_split_repeats, seed, rdm_metric, rsa_metric,
+        ):
+    cache_path = Path(cache_path)
+    settings = {
+        "channel_numbers": np.asarray(channel_numbers, dtype=int),
+        "stimuli": np.asarray(stimuli, dtype=str),
+        "numeric_settings": np.asarray(
+            [neural_fs, end_ms, source_fs, n_split_repeats, seed], dtype=float,
+        ),
+        "metrics": np.asarray([rdm_metric, rsa_metric], dtype=str),
+    }
+    if cache_path.is_file():
+        with np.load(cache_path, allow_pickle=False) as archive:
+            # Reuse the cache only if every setting that shapes the result matches.
+            matches = all(
+                name in archive.files and np.array_equal(archive[name], value)
+                for name, value in settings.items()
+            )
+            if matches:
+                return (
+                    archive["reliability_splits"],
+                    archive["reliability_stimuli"].tolist(),
+                    int(archive["n_presentations"]),
+                )
+            # end if matches
+        # end with np.load
+        print(f"{cache_path.name}: cached settings differ, recomputing.")
+    # end if cache_path.is_file()
+
+    # channels x time x presentations at neural_fs, restricted to the stimuli.
+    presentations, identities = load_dynamic_presentations(
+        dynamic_raster_path,
+        {"channel_numbers": channel_numbers, "stimuli": stimuli, "neural_fs": neural_fs},
+        end_ms, source_fs=source_fs, margin_ms=0,
+    )
+    repetition_counts = Counter(identities)
+    reliability_stimuli = [
+        stimulus for stimulus in stimuli if repetition_counts[stimulus] >= 2
+    ]
+    reliability_splits = compute_split_half_reliability(
+        presentations, identities, reliability_stimuli, "rsa",
+        np.random.default_rng(seed), n_split_repeats,
+        rdm_metric=rdm_metric, rsa_metric=rsa_metric,
+    )
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(
+        cache_path,
+        reliability_splits=reliability_splits,
+        reliability_stimuli=np.asarray(reliability_stimuli, dtype=str),
+        n_presentations=len(identities),
+        **settings,
+    )
+    return reliability_splits, reliability_stimuli, len(identities)
 # EOF
 
 

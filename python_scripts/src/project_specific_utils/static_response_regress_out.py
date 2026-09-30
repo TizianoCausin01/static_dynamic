@@ -8,6 +8,7 @@ Both are channels x time x stimuli and share the same stimulus order.
 """
 
 import numpy as np
+from sklearn.decomposition import PCA
 
 from useful_stuff.general_utils import TimeSeries, dyn_linear_encoding
 
@@ -103,14 +104,20 @@ INPUT:
     - n_splits: int -> number of stimulus folds when cv_type is "kf".
     - shuffle: bool -> whether the stimulus folds are shuffled.
     - fit_intercept: bool -> whether every slice model has an intercept.
+    - pca_variance: float | None -> if given, the predictor features of every
+        slice are projected onto the principal components that keep this
+        fraction of their variance before the regression. The PCA is fitted on
+        the training stimuli of each fold only.
 
 OUTPUT:
     - predicted_array: np.ndarray -> channels x slices x stimuli prediction.
     - chosen_alphas: np.ndarray -> ridge penalty of the last fit per slice.
+    - n_components: np.ndarray -> PCA components kept in the last fold per
+        slice (NaN without PCA).
 """
 def _slicewise_regress_out(
         predictor_array, target_array, regression_type, alphas, cv_type,
-        n_splits, shuffle, fit_intercept,
+        n_splits, shuffle, fit_intercept, pca_variance=None,
         ):
     if cv_type not in ('kf', 'same'):
         raise ValueError("cv_type must be 'kf' or 'same'.")
@@ -118,6 +125,7 @@ def _slicewise_regress_out(
     n_slices = target_array.shape[1]
     predicted_array = np.zeros_like(target_array)
     chosen_alphas = np.full(n_slices, np.nan)
+    n_components = np.full(n_slices, np.nan)
     for slice_index in range(n_slices):
         # features x stimuli within this single slice.
         predictor_s = predictor_array[:, slice_index, :]
@@ -132,18 +140,25 @@ def _slicewise_regress_out(
         stimulus_indices = np.arange(target_s.shape[1])
         for train_idx, test_idx in regression_model.get_cv_obj().split(
                 stimulus_indices):
-            regression_model.fit(
-                predictor_s[:, train_idx], target_s[:, train_idx],
-            )
+            train_predictor = predictor_s[:, train_idx]
+            test_predictor = predictor_s[:, test_idx]
+            if pca_variance is not None:
+                # sklearn wants stimuli x features; the model wants features x stimuli.
+                pca = PCA(n_components=pca_variance, svd_solver='full')
+                train_predictor = pca.fit_transform(train_predictor.T).T
+                test_predictor = pca.transform(test_predictor.T).T
+                n_components[slice_index] = pca.n_components_
+            # end if PCA requested
+            regression_model.fit(train_predictor, target_s[:, train_idx])
             predicted_array[:, slice_index, test_idx] = regression_model.predict(
-                predictor_s[:, test_idx],
+                test_predictor,
             )
         # end for train_idx, test_idx
         if hasattr(regression_model.get_regression_obj(), 'alpha_'):
             chosen_alphas[slice_index] = regression_model.get_regression_obj().alpha_
         # end if the regression object tunes a penalty
     # end for slice_index
-    return predicted_array, chosen_alphas
+    return predicted_array, chosen_alphas, n_components
 # EOF
 
 
@@ -216,6 +231,8 @@ INPUT:
     - n_splits: int -> number of stimulus folds when cv_type is "kf".
     - shuffle: bool -> whether the stimulus folds are shuffled.
     - fit_intercept: bool -> whether every timepoint model has an intercept.
+    - pca_variance: float | None -> fraction of predictor variance kept by an
+        in-fold PCA before every timepoint regression; None disables the PCA.
 
 OUTPUT:
     - residual_ts: TimeSeries -> channels x time x stimuli residual response.
@@ -227,6 +244,7 @@ def timepoint_static_regress_out(
         regression_type='ridge',
         alphas=(1e-2, 1e-1, 1, 1e1, 1e2, 1e3, 1e4, 1e5),
         cv_type='kf', n_splits=5, shuffle=False, fit_intercept=True,
+        pca_variance=None,
         ):
     _check_static_pair(predictor_ts, target_ts)
     predictor_array = _embedded_predictor_array(
@@ -234,9 +252,9 @@ def timepoint_static_regress_out(
     )
     target_array = np.asarray(target_ts.get_array(), dtype=np.float64)
     # Every static timepoint is one slice with its own model.
-    predicted_array, chosen_alphas = _slicewise_regress_out(
+    predicted_array, chosen_alphas, _ = _slicewise_regress_out(
         predictor_array, target_array, regression_type, alphas, cv_type,
-        n_splits, shuffle, fit_intercept,
+        n_splits, shuffle, fit_intercept, pca_variance=pca_variance,
     )
 
     residual_array = target_array - predicted_array
@@ -310,7 +328,7 @@ def window_static_regress_out(
     predictor_patterns = window_patterns(predictor_ts, windows_ms)
     target_patterns = window_patterns(target_ts, windows_ms)
     # Every window is one slice with its own model.
-    predicted_patterns, chosen_alphas = _slicewise_regress_out(
+    predicted_patterns, chosen_alphas, _ = _slicewise_regress_out(
         predictor_patterns, target_patterns, regression_type, alphas, cv_type,
         n_splits, shuffle, fit_intercept,
     )
@@ -348,22 +366,126 @@ def window_model_timecourses(dynamic_rdms, patterns, rdm_metric, rsa_metric):
 
 
 """
+previous_response_rasters
+Earlier static response(s) used as predictors for one regressed condition.
+A name joining several frames with "+" (e.g. "2000ms+2250ms") stacks their
+responses along the channel axis, so they are regressed out together.
+
+INPUT:
+    - rasters_by_frame: dict[str, np.ndarray] -> channels x static time x
+        stimuli response of every earlier frame (e.g. "2000ms", "2250ms").
+    - condition_name: str -> one frame name or several joined by "+".
+
+OUTPUT:
+    - predictor_rasters: np.ndarray -> (channels * frames) x static time x stimuli.
+"""
+def previous_response_rasters(rasters_by_frame, condition_name):
+    return np.concatenate(
+        [rasters_by_frame[frame] for frame in condition_name.split("+")], axis=0,
+    )
+# EOF
+
+
+"""
+regress_out_static_response
+Remove an earlier static response from the last-frame static response with one
+of two per-timepoint regressions (stimuli are the samples in both):
+    - "channelwise": channelwise_regress_out, every channel regressed on the
+      same channel's earlier response (one predictor, in-sample OLS);
+    - "timepoint": timepoint_static_regress_out, every channel regressed on all
+      (delay-embedded) channels of the earlier response, "lr" or "ridge",
+      with out-of-fold ("kf") or in-sample ("same") residuals, optionally
+      after an in-fold PCA of the predictors ("pca_variance").
+The earlier response may hold more channels than the last frame (several
+frames stacked by previous_response_rasters); only "timepoint" allows this.
+
+INPUT:
+    - previous_rasters: np.ndarray -> channels x static time x stimuli earlier response.
+    - static_rasters: np.ndarray -> channels x static time x stimuli last frame.
+    - fs: float -> sampling rate of both responses in Hz.
+    - method: str -> "channelwise" or "timepoint".
+    - timepoint_kwargs: dict | None -> keyword arguments of
+        timepoint_static_regress_out (delay_embedding_lags, regression_type,
+        alphas, cv_type, n_splits, pca_variance); ignored for "channelwise".
+
+OUTPUT:
+    - residual_rasters: np.ndarray -> channels x static time x stimuli residual.
+"""
+def regress_out_static_response(
+        previous_rasters, static_rasters, fs, method="channelwise",
+        timepoint_kwargs=None,
+        ):
+    if method == "channelwise":
+        if np.shape(previous_rasters) != np.shape(static_rasters):
+            raise ValueError(
+                "channelwise regression needs one predictor channel per target "
+                "channel; use method='timepoint' for stacked frames."
+            )
+        # end if predictor and target channels differ
+        residual_rasters, _, _, _ = channelwise_regress_out(
+            previous_rasters, static_rasters,
+        )
+        return residual_rasters
+    elif method == "timepoint":
+        residual_ts, _, _ = timepoint_static_regress_out(
+            TimeSeries(np.asarray(previous_rasters, dtype=np.float64), fs=fs),
+            TimeSeries(np.asarray(static_rasters, dtype=np.float64), fs=fs),
+            **(timepoint_kwargs or {}),
+        )
+        return residual_ts.get_array()
+    # end if method
+    raise ValueError("method must be 'channelwise' or 'timepoint'.")
+# EOF
+
+
+"""
+regressed_condition_suffix
+File-name token of one regressed static condition, shared by the permutation
+runner and the notebooks that load its results. The channelwise method keeps
+the historical "<frame>-signal-regressed" name.
+
+INPUT:
+    - previous_name: str -> regressed-out response, e.g. "2250ms".
+    - method: str -> "channelwise" or "timepoint".
+    - regression_type: str -> "lr" or "ridge" (timepoint only).
+    - cv_type: str -> "kf" or "same" (timepoint only).
+    - pca_variance: float | None -> PCA variance fraction (timepoint only).
+
+OUTPUT:
+    - suffix: str -> e.g. "2250ms-signal-regressed",
+        "2250ms-timepoint-ridge-kf-regressed" or
+        "2000ms+2250ms-timepoint-ridge-kf-pca95-regressed".
+"""
+def regressed_condition_suffix(previous_name, method="channelwise",
+                               regression_type="ridge", cv_type="kf",
+                               pca_variance=None):
+    if method == "channelwise":
+        return f"{previous_name}-signal-regressed"
+    # end if channelwise
+    pca_token = "" if pca_variance is None else f"-pca{round(100 * pca_variance):d}"
+    return f"{previous_name}-{method}-{regression_type}-{cv_type}{pca_token}-regressed"
+# EOF
+
+
+"""
 regressed_static_dynamic_drsa
 Static-dynamic dRSA (movie time x static time RDM similarity) for the raw
-last-frame response and after regressing out each earlier static response.
-The regression is channelwise_regress_out: for every channel and static
-timepoint, the last-frame response across stimuli is regressed on the same
-channel's earlier-frame response, and the static RDMs are built from the
-residuals (the "signal" option of static_dynamic_drsa_permutation.ipynb).
+last-frame response and after regressing out each earlier static response
+with regress_out_static_response; the static RDMs are built from the
+residual responses.
 
 INPUT:
     - static_rasters: np.ndarray -> channels x static time x stimuli last frame.
     - dynamic_rasters: np.ndarray -> channels x movie time x stimuli.
     - previous_rasters_by_name: dict[str, np.ndarray] -> earlier static
-        responses (e.g. {"2000ms": ..., "2250ms": ...}), shaped like
+        responses per condition (e.g. {"2000ms": ..., "2250ms": ...,
+        "2000ms+2250ms": stacked}), sharing static time and stimuli with
         static_rasters.
     - rdm_metric: str -> distance metric for the neural RDMs.
     - rsa_metric: str -> "correlation" or "spearman".
+    - fs: float -> sampling rate of the static responses in Hz.
+    - regress_out_method: str -> "channelwise" or "timepoint".
+    - timepoint_kwargs: dict | None -> options of timepoint_static_regress_out.
 
 OUTPUT:
     - drsa_by_condition: dict[str, np.ndarray] -> movie time x static time
@@ -371,16 +493,17 @@ OUTPUT:
 """
 def regressed_static_dynamic_drsa(
         static_rasters, dynamic_rasters, previous_rasters_by_name,
-        rdm_metric="cosine_cnt", rsa_metric="spearman",
+        rdm_metric="cosine_cnt", rsa_metric="spearman", fs=100,
+        regress_out_method="channelwise", timepoint_kwargs=None,
         ):
     dynamic_rdms = compute_rdm_timeseries(dynamic_rasters, rdm_metric)
     # The raw last-frame response is the reference condition.
     static_rasters_by_condition = {"raw": static_rasters}
     for previous_name, previous_rasters in previous_rasters_by_name.items():
-        residual_rasters, _, _, _ = channelwise_regress_out(
-            previous_rasters, static_rasters,
+        static_rasters_by_condition[previous_name] = regress_out_static_response(
+            previous_rasters, static_rasters, fs,
+            method=regress_out_method, timepoint_kwargs=timepoint_kwargs,
         )
-        static_rasters_by_condition[previous_name] = residual_rasters
     # end for previous_name
     return {
         condition_name: cross_temporal_similarity(

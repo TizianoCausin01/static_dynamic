@@ -1,6 +1,8 @@
 import numpy as np
 from scipy.ndimage import gaussian_filter1d
 
+from .split_half_rsa import average_repetition_halves, rowwise_similarity
+
 
 """
 window_mean_responses
@@ -319,4 +321,71 @@ def bootstrap_rowwise_orthogonal_slopes(
         bootstrap_slopes, interval_quantiles, axis=1,
     ).T
     return slope_confidence_intervals
+# EOF
+
+
+"""
+split_half_tuning_reliability
+Split-half reliability of stimulus tuning. The presentations of every stimulus
+are split into two random halves, each half is averaged, and the two
+rows x stimuli tuning matrices are correlated row by row across stimuli.
+Repeated over random splits; values are uncorrected half-vs-half correlations.
+
+INPUT:
+    - presentation_responses: np.ndarray -> rows (e.g. channels) x presentations
+        window-mean responses
+    - presentation_identities: list[str] -> stimulus identity of every presentation
+    - stimulus_order: list[str] -> stimuli entering the tuning vectors
+    - rng: np.random.Generator -> random generator for the splits
+    - n_split_repeats: int -> number of random repetition splits
+    - metric: str -> "correlation" (Pearson) or "spearman"
+
+OUTPUT:
+    - split_reliability: np.ndarray -> splits x rows half-vs-half correlations
+"""
+def split_half_tuning_reliability(
+        presentation_responses, presentation_identities, stimulus_order, rng,
+        n_split_repeats, metric="spearman",
+        ):
+    presentation_responses = np.asarray(presentation_responses, dtype=np.float64)
+    if presentation_responses.ndim != 2:
+        raise ValueError("presentation_responses must be rows x presentations.")
+    # end if presentation_responses.ndim
+    split_reliability = np.full(
+        (n_split_repeats, presentation_responses.shape[0]), np.nan,
+    )
+    for split_index in range(n_split_repeats):
+        # rows x 1 x stimuli averages of disjoint repetitions (singleton time axis).
+        first_half, second_half = average_repetition_halves(
+            presentation_responses[:, np.newaxis, :], presentation_identities,
+            stimulus_order, rng,
+        )
+        split_reliability[split_index] = rowwise_similarity(
+            first_half[:, 0, :], second_half[:, 0, :], metric=metric,
+        )
+    # end for split_index
+    return split_reliability
+# EOF
+
+
+"""
+tuning_noise_ceiling
+Largest correlation two noisy tuning measurements can reach given their
+reliabilities (classic disattenuation bound): sqrt(reliability_a * reliability_b).
+Undefined (NaN) wherever either reliability is not positive.
+
+INPUT:
+    - first_reliability: np.ndarray -> reliability of the first measurement
+    - second_reliability: np.ndarray -> reliability of the second measurement
+
+OUTPUT:
+    - noise_ceiling: np.ndarray -> maximum achievable correlation
+"""
+def tuning_noise_ceiling(first_reliability, second_reliability):
+    first_reliability = np.asarray(first_reliability, dtype=np.float64)
+    second_reliability = np.asarray(second_reliability, dtype=np.float64)
+    noise_ceiling = np.full(np.broadcast(first_reliability, second_reliability).shape, np.nan)
+    valid = (first_reliability > 0) & (second_reliability > 0)
+    np.sqrt(first_reliability * second_reliability, out=noise_ceiling, where=valid)
+    return noise_ceiling
 # EOF
