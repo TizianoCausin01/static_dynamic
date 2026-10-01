@@ -59,6 +59,10 @@ class Cfg:
     n_jobs: int = 1
     alpha: float = 0.05
     cluster_alpha: float = 0.05
+    # Static window (ms from image onset) of the best-static-match curves: for
+    # every permutation, the max over these static bins at each movie bin is
+    # saved, so the curve test can apply the same max (and smoothing) to the null.
+    best_static_window_ms: tuple[float, float] = (0, 1000)
     # "channelwise": each channel on its own earlier response (in-sample OLS);
     # "timepoint": each channel on all delay-embedded channels, one model per
     # static timepoint (timepoint_static_regress_out).
@@ -95,6 +99,10 @@ def parse_args() -> Cfg:
     parser.add_argument("--random_seed", type=int)
     parser.add_argument("--n_jobs", type=int)
     parser.add_argument("--cluster_alpha", type=float)
+    parser.add_argument(
+        "--best_static_window_ms", type=float, nargs=2,
+        help="Static window (ms) maximised over for the best-static-match null curves.",
+    )
     parser.add_argument("--regress_out_method", choices=("channelwise", "timepoint"))
     parser.add_argument("--timepoint_regression_type", choices=("lr", "ridge"))
     parser.add_argument("--timepoint_cv_type", choices=("kf", "same"))
@@ -112,6 +120,7 @@ def parse_args() -> Cfg:
             setattr(cfg, field_name, value)
         # end if the user supplied the argument
     # end for field_name
+    cfg.best_static_window_ms = tuple(cfg.best_static_window_ms)
     if cfg.timepoint_delay_embedding_lags is not None:
         cfg.timepoint_delay_embedding_lags = tuple(cfg.timepoint_delay_embedding_lags)
     # end if lags given
@@ -211,6 +220,10 @@ def main() -> None:
         )
         static_times_ms = np.arange(next(iter(static_rdms.values())).shape[0]) * 1000 / cfg.new_fs
         dynamic_times_ms = np.arange(dynamic_rdms.shape[0]) * 1000 / cfg.new_fs
+        best_static_bins = (
+            (static_times_ms >= cfg.best_static_window_ms[0])
+            & (static_times_ms < cfg.best_static_window_ms[1])
+        )
         print(f"{monkey}: {len(channel_numbers)} channels, {len(shared_stimuli)} stimuli", flush=True)
 
         for condition, condition_rdms in static_rdms.items():
@@ -223,6 +236,9 @@ def main() -> None:
             )
             p_values = permutation_p_values(observed, null)
             clusters = cluster_permutation_test(observed, null, cluster_alpha=cfg.cluster_alpha)
+            # permutations x movie time: best static match of every null matrix,
+            # the same max the plotted curves take over the observed matrix.
+            null_best_static_curves = np.nanmax(null[:, :, best_static_bins], axis=2)
             # The full null (permutations x movie x static) is not saved.
             del null
 
@@ -245,6 +261,8 @@ def main() -> None:
                 cluster_masses=clusters["masses"],
                 cluster_p=clusters["p_values"],
                 null_max_cluster_mass=clusters["null_max_mass"],
+                null_best_static_curves=null_best_static_curves.astype(np.float32),
+                best_static_window_ms=np.asarray(cfg.best_static_window_ms),
                 static_times_ms=static_times_ms,
                 dynamic_times_ms=dynamic_times_ms,
                 shared_stimuli=np.asarray(shared_stimuli),
