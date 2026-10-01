@@ -532,3 +532,42 @@ def remove_small_significant_regions(
     kept_regions = kept_regions[kept_regions > 0]
     return np.isin(labels, kept_regions)
 # EOF
+
+
+"""
+curve_cluster_significance
+Cluster-mass permutation test on one timecourse, e.g. the best static match
+per movie time. Each null curve must come from the same pipeline as the
+observed curve (same reduction over the second time axis, same smoothing),
+so that biases such as the upward shift of a maximum are present in the null
+too. Clusters are runs of consecutive timebins above the pointwise null
+percentile; every cluster mass is compared with the largest null cluster mass.
+
+INPUT:
+    - observed_curve: np.ndarray -> (time,) observed values
+    - null_curves: np.ndarray -> (permutations, time) null values
+    - cluster_alpha: float -> pointwise cluster-forming threshold
+    - alpha: float -> cluster-level significance level
+
+OUTPUT:
+    - significant: np.ndarray -> (time,) boolean, True inside significant clusters
+    - clusters: dict -> output of cluster_permutation_test
+"""
+def curve_cluster_significance(
+        observed_curve: np.ndarray,
+        null_curves: np.ndarray,
+        cluster_alpha: float = 0.05,
+        alpha: float = 0.05,
+        ) -> tuple[np.ndarray, dict]:
+    observed_curve = np.asarray(observed_curve, dtype=float)
+    null_curves = np.asarray(null_curves, dtype=float)
+    if null_curves.ndim != 2 or null_curves.shape[1] != observed_curve.shape[0]:
+        raise ValueError("null_curves must be permutations x the observed time axis.")
+    # end if shapes differ
+    # 1D labelling: a cluster is a run of consecutive supra-threshold bins.
+    clusters = cluster_permutation_test(observed_curve, null_curves, cluster_alpha)
+    significant_labels = np.flatnonzero(clusters["p_values"] < alpha) + 1
+    significant = np.isin(clusters["labels"], significant_labels)
+    return significant, clusters
+# EOF
+

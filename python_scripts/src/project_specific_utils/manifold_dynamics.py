@@ -1,4 +1,4 @@
-from matplotlib.collections import LineCollection
+from matplotlib.collections import LineCollection, PolyCollection
 import matplotlib.pyplot as plt
 from matplotlib.colors import to_rgb
 from matplotlib.lines import Line2D
@@ -826,25 +826,28 @@ def plot_significance_masked_matrix(
 plot_gradient_trajectory_2d
 Draw a 2D trajectory as a line whose colour follows time. The trajectory is
 cubic-spline interpolated in time so both the curve and the colour gradient
-look continuous. A dotted line is drawn by keeping alternating stretches of
-equal arc length, measured in axis-fraction units; set the axis limits
-before calling so the dots have a uniform size.
+look continuous. A dashed line keeps alternating stretches of equal arc length,
+measured in axis-fraction units; set the axis limits before calling so the
+dashes have a uniform size. Optional arrowheads, evenly spaced along the arc,
+point in the direction of increasing time.
 
 INPUT:
     - axis: matplotlib.axes.Axes -> axis to draw on
     - scores: np.ndarray -> (time, 2) trajectory coordinates
     - times_s: np.ndarray -> (time,) time of each sample, mapped to colour
-    - cmap: str -> colormap name
+    - cmap: str | matplotlib.colors.Colormap -> colormap (name or object)
     - norm: matplotlib.colors.Normalize -> time-to-colour normalization
     - upsample: int -> interpolated points per original sample interval
     - linewidth: float -> line width
     - alpha: float -> line opacity
-    - dotted: bool -> draw a dotted instead of a solid line
-    - dot_length: float -> length of each dot as a fraction of the axis
+    - dashed: bool -> draw a dashed instead of a solid line
+    - dash_length: float -> length of each dash as a fraction of the axis
     - gap_length: float -> length of each gap as a fraction of the axis
     - outline_color: str | None -> colour of an outline drawn under the line;
         None draws no outline
     - outline_width: float -> outline thickness added on each side of the line
+    - n_arrows: int -> arrowheads along the trajectory; 0 draws none
+    - arrow_size: float -> arrowhead size in points
     - zorder: float -> drawing order
 
 OUTPUT:
@@ -855,16 +858,18 @@ def plot_gradient_trajectory_2d(
         axis,
         scores: np.ndarray,
         times_s: np.ndarray,
-        cmap: str,
+        cmap,
         norm,
         upsample: int = 10,
         linewidth: float = 2,
         alpha: float = 1,
-        dotted: bool = False,
-        dot_length: float = 0.008,
+        dashed: bool = False,
+        dash_length: float = 0.025,
         gap_length: float = 0.015,
         outline_color: str | None = None,
         outline_width: float = 1,
+        n_arrows: int = 0,
+        arrow_size: float = 30,
         zorder: float = 1,
         ):
     # Cubic spline through the samples gives a smooth (fine_time, 2) curve.
@@ -877,42 +882,68 @@ def plot_gradient_trajectory_2d(
     segments = np.stack([fine_scores[:-1], fine_scores[1:]], axis=1)
     segment_times_s = (fine_times_s[:-1] + fine_times_s[1:]) / 2
 
-    if dotted:
-        # Measure arc length in axis fractions, so dots look the same on x and y.
-        axis_span = np.array([np.ptp(axis.get_xlim()), np.ptp(axis.get_ylim())])
-        steps = np.diff(fine_scores, axis=0) / axis_span
-        segment_lengths = np.linalg.norm(steps, axis=1)
-        midpoint_arc = np.cumsum(segment_lengths) - segment_lengths / 2
-        # Repeat dot, gap, dot, ... along the arc; keep only the dot stretches.
-        keep = midpoint_arc % (dot_length + gap_length) < dot_length
+    # Arc length in axis fractions, so dashes and arrow spacing look the same
+    # on x and y whatever the data ranges.
+    axis_span = np.array([np.ptp(axis.get_xlim()), np.ptp(axis.get_ylim())])
+    segment_lengths = np.linalg.norm(np.diff(fine_scores, axis=0) / axis_span, axis=1)
+    midpoint_arc = np.cumsum(segment_lengths) - segment_lengths / 2
+
+    if dashed:
+        # Repeat dash, gap, dash, ... along the arc; keep only the dash stretches.
+        keep = midpoint_arc % (dash_length + gap_length) < dash_length
         segments = segments[keep]
         segment_times_s = segment_times_s[keep]
-    # end if dotted
+    # end if dashed
+    # Flat ends keep dashes crisp; round ends join a solid line smoothly.
+    capstyle = "butt" if dashed else "round"
 
     if outline_color is not None:
         # One wider single-colour line underneath, so the outline never covers
         # neighbouring segments (per-segment path effects would).
         axis.add_collection(LineCollection(
-            segments, colors=outline_color, alpha=alpha, capstyle="round",
+            segments, colors=outline_color, alpha=alpha, capstyle=capstyle,
             linewidth=linewidth + 2 * outline_width, zorder=zorder - 0.1,
         ))
     # end if outline_color
 
     collection = LineCollection(
         segments, cmap=cmap, norm=norm, linewidth=linewidth, alpha=alpha,
-        capstyle="round", zorder=zorder,
+        capstyle=capstyle, zorder=zorder,
     )
     collection.set_array(segment_times_s)
     axis.add_collection(collection)
+
+    if n_arrows > 0:
+        colormap = plt.get_cmap(cmap)
+        # Arrows at the centres of n_arrows equal arc-length stretches.
+        arrow_arcs = (np.arange(n_arrows) + 0.5) / n_arrows * midpoint_arc[-1]
+        for arrow_arc in arrow_arcs:
+            segment_index = min(np.searchsorted(midpoint_arc, arrow_arc), len(segment_lengths) - 1)
+            # Direction from the local tangent: segment start -> segment end.
+            start_point, end_point = fine_scores[segment_index], fine_scores[segment_index + 1]
+            # Colour of the arrow = time at that point of the (undashed) curve.
+            arrow_time = (fine_times_s[segment_index] + fine_times_s[segment_index + 1]) / 2
+            axis.annotate(
+                "", xy=end_point, xytext=start_point,
+                arrowprops=dict(
+                    arrowstyle="-|>", mutation_scale=arrow_size, shrinkA=0, shrinkB=0,
+                    facecolor=colormap(norm(arrow_time)),
+                    edgecolor="black", linewidth=0.8,
+                ),
+                zorder=zorder + 0.5,
+            )
+        # end for arrow_arc
+    # end if n_arrows
     return collection
 # EOF
 
 
 """
 plot_static_movie_trajectories_2d
-Draw the PC1-PC2 stimulus-average trajectories of the static image (solid)
-and the movie (dotted), both coloured by movie-aligned time, fit the axis
-limits to them and add a legend.
+Draw the PC1-PC2 stimulus-average trajectories of the static image (solid,
+outlined) and the movie (dashed, no outline), both coloured by movie-aligned
+time and marked with arrowheads in the direction of time; fit the axis limits
+to them and add a legend.
 
 INPUT:
     - axis: matplotlib.axes.Axes -> axis to draw on
@@ -921,12 +952,16 @@ INPUT:
     - static_color_times: np.ndarray -> (static time,) movie-aligned time of
         every static sample, mapped to colour
     - movie_color_times: np.ndarray -> (movie time,) time of every movie sample
-    - cmap: str -> colormap name
+    - cmap: str | matplotlib.colors.Colormap -> colormap (name or object)
     - norm: matplotlib.colors.Normalize -> time-to-colour normalization
     - linewidth: float -> trajectory line width
+    - movie_linewidth: float | None -> dashed movie line width; None = linewidth
+    - movie_alpha: float -> opacity of the dashed movie line
     - upsample: int -> cubic-spline points per sample interval
-    - dot_length: float -> movie dot length as a fraction of the axis
+    - dash_length: float -> movie dash length as a fraction of the axis
     - gap_length: float -> movie gap length as a fraction of the axis
+    - n_arrows: int -> arrowheads per trajectory; 0 draws none
+    - arrow_size: float -> arrowhead size in points
     - static_label: str -> legend label of the static trajectory
     - movie_label: str -> legend label of the movie trajectory
     - legend_fontsize: float | None -> legend font size; None = default
@@ -934,8 +969,8 @@ INPUT:
         bbox_to_anchor, ncol); None = matplotlib defaults
 
 OUTPUT:
-    - collection: matplotlib.collections.LineCollection -> movie line, usable
-        as the colorbar mappable
+    - collection: matplotlib.collections.LineCollection -> opaque static line,
+        usable as the colorbar mappable (the movie line may be transparent)
 """
 def plot_static_movie_trajectories_2d(
         axis,
@@ -943,41 +978,167 @@ def plot_static_movie_trajectories_2d(
         movie_scores: np.ndarray,
         static_color_times: np.ndarray,
         movie_color_times: np.ndarray,
-        cmap: str,
+        cmap,
         norm,
         linewidth: float = 3.5,
+        movie_linewidth: float | None = None,
+        movie_alpha: float = 1,
         upsample: int = 10,
-        dot_length: float = 0.008,
+        dash_length: float = 0.025,
         gap_length: float = 0.015,
+        n_arrows: int = 0,
+        arrow_size: float = 30,
         static_label: str = "static",
         movie_label: str = "movie",
         legend_fontsize: float | None = None,
         legend_kwargs: dict | None = None,
         ):
-    # Set limits first: the dotted line measures its dots in axis fractions.
+    # Set limits first: dashes and arrow spacing are measured in axis fractions.
     all_xy = np.vstack([static_scores[:, :2], movie_scores[:, :2]])
     lower, upper = all_xy.min(axis=0), all_xy.max(axis=0)
     margin = 0.05 * (upper - lower)
     axis.set_xlim(lower[0] - margin[0], upper[0] + margin[0])
     axis.set_ylim(lower[1] - margin[1], upper[1] + margin[1])
 
-    for scores, color_times, dotted in (
-            (static_scores, static_color_times, False),
-            (movie_scores, movie_color_times, True),
+    if movie_linewidth is None:
+        movie_linewidth = linewidth
+    # end if movie_linewidth not given
+    for scores, color_times, dashed, line_width, line_alpha in (
+            (static_scores, static_color_times, False, linewidth, 1),
+            (movie_scores, movie_color_times, True, movie_linewidth, movie_alpha),
             ):
-        # Dark outline keeps the light end of the colormap visible on white.
-        collection = plot_gradient_trajectory_2d(
+        # Outline only on the solid static line: it keeps the light end of the
+        # colormap visible on white; the dashed movie line has none.
+        line = plot_gradient_trajectory_2d(
             axis, scores[:, :2], color_times, cmap, norm,
-            upsample=upsample, linewidth=linewidth, dotted=dotted,
-            dot_length=dot_length, gap_length=gap_length,
-            outline_color="black", outline_width=1,
+            upsample=upsample, linewidth=line_width, alpha=line_alpha, dashed=dashed,
+            dash_length=dash_length, gap_length=gap_length,
+            outline_color=None if dashed else "black", outline_width=1,
+            n_arrows=n_arrows, arrow_size=arrow_size,
         )
-    # end for scores, color_times
+        if not dashed:
+            static_line = line
+        # end if static line
+    # end for scores, color_times, dashed, line_width, line_alpha
 
     # Line collections have no legend entry, so use grey proxy lines.
     axis.legend(handles=[
         Line2D([], [], color="grey", linewidth=2.5, label=static_label),
-        Line2D([], [], color="grey", linewidth=2.5, linestyle=":", label=movie_label),
+        Line2D(
+            [], [], color="grey", linewidth=2.5, linestyle="--", alpha=movie_alpha,
+            label=movie_label,
+        ),
     ], fontsize=legend_fontsize, **(legend_kwargs or {}))
+    return static_line
+# EOF
+
+
+"""
+plot_significance_bars
+Draw one horizontal bar per curve below zero (or below the lowest data,
+whichever is lower), covering the timebins where that curve is significant.
+Call after the curves are drawn, so the y limits reflect the data.
+
+INPUT:
+    - axis: matplotlib.axes.Axes -> axis holding the curves
+    - time: np.ndarray -> (time,) x coordinates shared by the masks
+    - masks: list[np.ndarray] -> (time,) boolean significance per curve
+    - colors: list -> bar colour per curve
+    - spacing_fraction: float -> vertical step between bars, as a fraction of
+        the y range of the data
+    - linewidth: float -> bar thickness
+
+OUTPUT:
+    - None
+"""
+def plot_significance_bars(
+        axis,
+        time: np.ndarray,
+        masks: list,
+        colors: list,
+        spacing_fraction: float = 0.04,
+        linewidth: float = 4,
+        ):
+    lower, upper = axis.get_ylim()
+    spacing = spacing_fraction * (upper - lower)
+    # Start just under zero, or under the curves if they dip below it.
+    base = min(0.0, lower + spacing)
+    for bar_index, (mask, color) in enumerate(zip(masks, colors)):
+        bar_y = base - (bar_index + 1) * spacing
+        # NaN outside the significant bins breaks the bar into segments.
+        bar = np.where(np.asarray(mask, dtype=bool), bar_y, np.nan)
+        axis.plot(
+            time, bar, color=color, linewidth=linewidth,
+            solid_capstyle="butt", label="_nolegend_",
+        )
+    # end for bar_index
+    axis.set_ylim(base - (len(masks) + 1) * spacing, upper)
+# EOF
+
+
+"""
+plot_trajectory_band_2d
+Draw an error band (e.g. SEM across stimuli) around a 2D trajectory. The
+trajectory and its errors are cubic-spline / linearly upsampled; at every point
+the band extends, on both sides along the curve normal, by the extent of the
+error ellipse (semi-axes = PC1 and PC2 errors) in that direction. Normals and
+extents are computed in axis-scaled units, so the band looks right on axes with
+very different ranges. The band is opaque (use a light colour) so overlapping
+pieces never darken.
+
+INPUT:
+    - axis: matplotlib.axes.Axes -> axis to draw on
+    - scores: np.ndarray -> (time, 2+) trajectory coordinates (first two used)
+    - errors: np.ndarray -> (time, 2+) error along each coordinate
+    - color: str | tuple -> band colour
+    - axis_span: np.ndarray | None -> (2,) x and y ranges used to scale the
+        normals; None uses the trajectory's own range
+    - upsample: int -> interpolated points per sample interval
+    - zorder: float -> drawing order (keep it below the lines)
+
+OUTPUT:
+    - collection: matplotlib.collections.PolyCollection -> drawn band
+"""
+def plot_trajectory_band_2d(
+        axis,
+        scores: np.ndarray,
+        errors: np.ndarray,
+        color,
+        axis_span: np.ndarray | None = None,
+        upsample: int = 10,
+        zorder: float = 1,
+        ):
+    sample_index = np.arange(len(scores))
+    fine_index = np.linspace(0, sample_index[-1], sample_index[-1] * upsample + 1)
+    # (fine time, 2) smooth curve and its interpolated errors.
+    fine_xy = CubicSpline(sample_index, scores[:, :2])(fine_index)
+    fine_errors = np.column_stack([
+        np.interp(fine_index, sample_index, errors[:, dimension]) for dimension in range(2)
+    ])
+    if axis_span is None:
+        axis_span = np.ptp(fine_xy, axis=0)
+    # end if axis_span not given
+    axis_span = np.asarray(axis_span, dtype=float)
+
+    # Unit tangent and normal in axis-scaled units (x and y in comparable units).
+    tangent = np.gradient(fine_xy, axis=0) / axis_span
+    tangent_norm = np.linalg.norm(tangent, axis=1, keepdims=True)
+    tangent = tangent / np.where(tangent_norm > 0, tangent_norm, 1)
+    normal = np.column_stack([-tangent[:, 1], tangent[:, 0]])
+    # Extent of the error ellipse along the normal, still in scaled units.
+    scaled_errors = fine_errors / axis_span
+    half_width = np.sqrt(
+        (scaled_errors[:, 0] * normal[:, 0]) ** 2 + (scaled_errors[:, 1] * normal[:, 1]) ** 2
+    )
+    # Back to data units: offset = normal * half width, rescaled per axis.
+    offset = normal * half_width[:, None] * axis_span
+    upper, lower = fine_xy + offset, fine_xy - offset
+    # One quadrilateral per step; edges in the same colour hide the seams.
+    quads = np.stack([upper[:-1], upper[1:], lower[1:], lower[:-1]], axis=1)
+    collection = PolyCollection(
+        quads, facecolors=color, edgecolors=color, linewidths=0.5, zorder=zorder,
+    )
+    axis.add_collection(collection)
+    axis.autoscale_view()
     return collection
 # EOF

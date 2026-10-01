@@ -8,7 +8,8 @@ from pathlib import Path
 
 from useful_stuff.general_utils import create_RDM
 
-from .dataloader import load_raster
+from .channel_reliability import last_frame_presentation_indices
+from .dataloader import load_raster, load_raster_presentation_names
 from .frame_similarity_latency import half_open_window_mean
 from .last_frame_decay import resample_array
 from .split_half_rsa import average_repetition_halves, compute_split_half_reliability
@@ -258,35 +259,85 @@ def load_dynamic_presentations(
 
 
 """
-load_or_compute_movie_split_half_reliability
-Split-half reliability of the movie RDM at every movie bin, cached on disk.
-The presentation-level raster (tens of GB for Neuropixels) is read only when
-no cached result matches the requested channels, stimuli and settings. The
-cache keeps the uncorrected correlations, so any Spearman-Brown correction is
-applied by the caller.
+load_static_presentations
+Load single last-frame image presentations (img_<identity>, excluding the
+2000-ms and 2250-ms controls) with the same channels and stimuli as the
+averaged data, cropped to crop_ms from image onset and resampled to neural_fs.
+Cropping happens before resampling, as for the averaged static responses.
+
+INPUT:
+    - static_raster_path: str | Path -> presentation-level image raster file
+    - channel_numbers: np.ndarray -> sorted one-based MATLAB channels to keep
+    - stimuli: list[str] -> stimulus identities to keep
+    - neural_fs: float -> analysis sampling frequency in Hz
+    - crop_ms: float -> response duration kept from image onset
+    - source_fs: float -> neural source sampling frequency in Hz
+
+OUTPUT:
+    - presentations: np.ndarray -> channels x time x presentations at neural_fs
+    - identities: list[str] -> stimulus identity of every presentation
+"""
+def load_static_presentations(
+        static_raster_path, channel_numbers, stimuli, neural_fs, crop_ms, source_fs=1000,
+        ):
+    presentation_indices, identities = last_frame_presentation_indices(
+        load_raster_presentation_names(static_raster_path),
+    )
+    stimulus_set = set(stimuli)
+    keep = np.asarray([identity in stimulus_set for identity in identities])
+    presentation_indices = presentation_indices[keep]
+    identities = [identity for identity, kept in zip(identities, keep) if kept]
+    # HDF5 cannot combine explicit channel and presentation indices in one read,
+    # so the contiguous range covering the channels is read and then subset.
+    channel_numbers = np.asarray(channel_numbers, dtype=int)
+    first_channel, last_channel = channel_numbers[0], channel_numbers[-1]
+    presentations, _ = load_raster(
+        static_raster_path,
+        channel_slice=slice(first_channel - 1, last_channel),
+        end_sample=int(round(crop_ms * source_fs / 1000)),
+        presentation_indices=presentation_indices,
+    )
+    presentations = presentations[channel_numbers - first_channel]
+    return resample_array(presentations, source_fs, neural_fs), identities
+# EOF
+
+
+"""
+load_or_compute_split_half_rdm_reliability
+Split-half reliability of the RDM at every timebin of the movie or of the
+last-frame image response, cached on disk. The presentation-level raster (tens
+of GB for Neuropixels) is read only when no cached result matches the
+requested channels, stimuli and settings. The cache keeps the uncorrected
+correlations, so any Spearman-Brown correction is applied by the caller.
 
 INPUT:
     - cache_path: str | Path -> .npz file holding (or receiving) the result
-    - dynamic_raster_path: str | Path -> presentation-level movie raster file
+    - raster_path: str | Path -> presentation-level movie or image raster file
     - channel_numbers: np.ndarray -> one-based MATLAB channels to keep
     - stimuli: list[str] -> candidate stimuli; those with >= 2 repetitions are used
     - neural_fs: float -> analysis sampling frequency in Hz
-    - end_ms: float -> last movie time loaded
+    - end_ms: float -> last time loaded (movie) or crop length (image)
     - source_fs: float -> neural source sampling frequency in Hz
     - n_split_repeats: int -> number of random repetition splits
     - seed: int -> split random seed
     - rdm_metric: str -> neural RDM metric
     - rsa_metric: str -> half-vs-half RDM similarity metric
+    - condition: str -> "movie" (vid_ presentations) or "static" (last-frame
+        img_ presentations)
 
 OUTPUT:
-    - reliability_splits: np.ndarray -> splits x movie time uncorrected RDM correlations
+    - reliability_splits: np.ndarray -> splits x time uncorrected RDM correlations
     - reliability_stimuli: list[str] -> stimuli with at least two repetitions
     - n_presentations: int -> presentations of the candidate stimuli
 """
-def load_or_compute_movie_split_half_reliability(
-        cache_path, dynamic_raster_path, channel_numbers, stimuli, neural_fs,
+def load_or_compute_split_half_rdm_reliability(
+        cache_path, raster_path, channel_numbers, stimuli, neural_fs,
         end_ms, source_fs, n_split_repeats, seed, rdm_metric, rsa_metric,
+        condition="movie",
         ):
+    if condition not in ("movie", "static"):
+        raise ValueError("condition must be 'movie' or 'static'.")
+    # end if invalid condition
     cache_path = Path(cache_path)
     settings = {
         "channel_numbers": np.asarray(channel_numbers, dtype=int),
@@ -315,11 +366,17 @@ def load_or_compute_movie_split_half_reliability(
     # end if cache_path.is_file()
 
     # channels x time x presentations at neural_fs, restricted to the stimuli.
-    presentations, identities = load_dynamic_presentations(
-        dynamic_raster_path,
-        {"channel_numbers": channel_numbers, "stimuli": stimuli, "neural_fs": neural_fs},
-        end_ms, source_fs=source_fs, margin_ms=0,
-    )
+    if condition == "movie":
+        presentations, identities = load_dynamic_presentations(
+            raster_path,
+            {"channel_numbers": channel_numbers, "stimuli": stimuli, "neural_fs": neural_fs},
+            end_ms, source_fs=source_fs, margin_ms=0,
+        )
+    else:
+        presentations, identities = load_static_presentations(
+            raster_path, channel_numbers, stimuli, neural_fs, end_ms, source_fs=source_fs,
+        )
+    # end if condition
     repetition_counts = Counter(identities)
     reliability_stimuli = [
         stimulus for stimulus in stimuli if repetition_counts[stimulus] >= 2
@@ -339,6 +396,10 @@ def load_or_compute_movie_split_half_reliability(
     )
     return reliability_splits, reliability_stimuli, len(identities)
 # EOF
+
+
+# Former name, kept so existing callers keep working (movie RDMs).
+load_or_compute_movie_split_half_reliability = load_or_compute_split_half_rdm_reliability
 
 
 """

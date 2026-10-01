@@ -57,6 +57,8 @@ __all__ = [
     'plot_significance_masked_matrix', 'regressed_static_dynamic_drsa',
     'remove_small_significant_regions', 'regress_out_static_response',
     'regressed_condition_suffix', 'previous_response_rasters',
+    'curve_cluster_significance', 'plot_significance_bars', 'plot_trajectory_band_2d',
+    'save_config_snapshot', 'yaml_safe',
 ]
 
 from .channel_reliability import (
@@ -105,7 +107,8 @@ from .manifold_dynamics import (
     compute_manifold_dynamics, compute_pc_subspaces,
     population_response_scores, select_manifold_subsets,
     plot_gradient_trajectory_2d, plot_significance_masked_matrix,
-    plot_static_movie_trajectories_2d,
+    plot_significance_bars, plot_static_movie_trajectories_2d,
+    plot_trajectory_band_2d,
     plot_static_dynamic_drsa_peak, plot_static_dynamic_matrix,
     regress_out_rdm_timeseries,
     static_dynamic_drsa_peak,
@@ -121,6 +124,7 @@ from .rdm_permutation_control import (
     latency_profile_smoothness, permute_rdm_entries, permuted_static_rsa,
     prepare_static_neural_rdms, static_model_rdms_by_layer,
     cluster_permutation_test, condensed_permutation_index,
+    curve_cluster_significance,
     permutation_p_values, permutation_significance_mask,
     permuted_cross_temporal_similarity, remove_small_significant_regions,
     standardize_rdm_rows,
@@ -145,3 +149,4 @@ from .static_response_regress_out import (
     regressed_condition_suffix, regressed_static_dynamic_drsa,
     timepoint_static_regress_out, window_model_timecourses, window_patterns, window_static_regress_out,
 )
+from .config_snapshot import save_config_snapshot, yaml_safe
