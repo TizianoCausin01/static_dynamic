@@ -941,9 +941,9 @@ def plot_gradient_trajectory_2d(
 """
 plot_static_movie_trajectories_2d
 Draw the PC1-PC2 stimulus-average trajectories of the static image (solid,
-outlined) and the movie (dashed, no outline), both coloured by movie-aligned
-time and marked with arrowheads in the direction of time; fit the axis limits
-to them and add a legend.
+outlined) and the movie (dashed without outline by default, or solid and
+outlined), both coloured by movie-aligned time, optionally with arrowheads in
+the direction of time; fit the axis limits to them and optionally add a legend.
 
 INPUT:
     - axis: matplotlib.axes.Axes -> axis to draw on
@@ -960,6 +960,9 @@ INPUT:
     - upsample: int -> cubic-spline points per sample interval
     - dash_length: float -> movie dash length as a fraction of the axis
     - gap_length: float -> movie gap length as a fraction of the axis
+    - movie_dashed: bool -> dashed movie line (True) or a solid one (False)
+    - movie_outline: bool -> draw the black outline under the movie line too
+    - show_legend: bool -> add the static/movie legend
     - n_arrows: int -> arrowheads per trajectory; 0 draws none
     - arrow_size: float -> arrowhead size in points
     - static_label: str -> legend label of the static trajectory
@@ -986,6 +989,9 @@ def plot_static_movie_trajectories_2d(
         upsample: int = 10,
         dash_length: float = 0.025,
         gap_length: float = 0.015,
+        movie_dashed: bool = True,
+        movie_outline: bool = False,
+        show_legend: bool = True,
         n_arrows: int = 0,
         arrow_size: float = 30,
         static_label: str = "static",
@@ -1003,32 +1009,36 @@ def plot_static_movie_trajectories_2d(
     if movie_linewidth is None:
         movie_linewidth = linewidth
     # end if movie_linewidth not given
-    for scores, color_times, dashed, line_width, line_alpha in (
-            (static_scores, static_color_times, False, linewidth, 1),
-            (movie_scores, movie_color_times, True, movie_linewidth, movie_alpha),
+    # Separate drawing layers (static below, movie above, each outline just under
+    # its own line), so where the trajectories cross the top line keeps its outline.
+    for is_movie, scores, color_times, dashed, outlined, line_width, line_alpha, layer in (
+            (False, static_scores, static_color_times, False, True, linewidth, 1, 1),
+            (True, movie_scores, movie_color_times, movie_dashed, movie_outline,
+             movie_linewidth, movie_alpha, 2),
             ):
-        # Outline only on the solid static line: it keeps the light end of the
-        # colormap visible on white; the dashed movie line has none.
+        # The black outline keeps the light end of the colormap visible on white.
         line = plot_gradient_trajectory_2d(
             axis, scores[:, :2], color_times, cmap, norm,
             upsample=upsample, linewidth=line_width, alpha=line_alpha, dashed=dashed,
             dash_length=dash_length, gap_length=gap_length,
-            outline_color=None if dashed else "black", outline_width=1,
-            n_arrows=n_arrows, arrow_size=arrow_size,
+            outline_color="black" if outlined else None, outline_width=1,
+            n_arrows=n_arrows, arrow_size=arrow_size, zorder=layer,
         )
-        if not dashed:
+        if not is_movie:
             static_line = line
         # end if static line
-    # end for scores, color_times, dashed, line_width, line_alpha
+    # end for is_movie, scores, color_times, dashed, outlined, line_width, line_alpha, layer
 
-    # Line collections have no legend entry, so use grey proxy lines.
-    axis.legend(handles=[
-        Line2D([], [], color="grey", linewidth=2.5, label=static_label),
-        Line2D(
-            [], [], color="grey", linewidth=2.5, linestyle="--", alpha=movie_alpha,
-            label=movie_label,
-        ),
-    ], fontsize=legend_fontsize, **(legend_kwargs or {}))
+    if show_legend:
+        # Line collections have no legend entry, so use grey proxy lines.
+        axis.legend(handles=[
+            Line2D([], [], color="grey", linewidth=2.5, label=static_label),
+            Line2D(
+                [], [], color="grey", linewidth=2.5, linestyle="--", alpha=movie_alpha,
+                label=movie_label,
+            ),
+        ], fontsize=legend_fontsize, **(legend_kwargs or {}))
+    # end if show_legend
     return static_line
 # EOF
 

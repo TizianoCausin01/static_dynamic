@@ -59,6 +59,7 @@ __all__ = [
     'regressed_condition_suffix', 'previous_response_rasters',
     'curve_cluster_significance', 'plot_significance_bars', 'plot_trajectory_band_2d',
     'save_config_snapshot', 'yaml_safe',
+    'CompactScientificFormatter', 'use_compact_scientific_ticks',
 ]
 
 from .channel_reliability import (
@@ -150,3 +151,4 @@ from .static_response_regress_out import (
     timepoint_static_regress_out, window_model_timecourses, window_patterns, window_static_regress_out,
 )
 from .config_snapshot import save_config_snapshot, yaml_safe
+from .plot_utils import CompactScientificFormatter, use_compact_scientific_ticks
