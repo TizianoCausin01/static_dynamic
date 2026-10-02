@@ -45,8 +45,10 @@ MONKEY_SESSIONS = {
 @dataclass
 class Cfg:
     monkeys: list[str] = field(default_factory=lambda: list(MONKEY_SESSIONS))
-    # "raw" and every earlier static response regressed out of the last frame;
-    # "2000ms+2250ms" regresses both frames out together (timepoint only).
+    # "raw" (last frame) and every earlier static response regressed out of the
+    # last frame; "2000ms+2250ms" regresses both frames out together (timepoint
+    # only); "frame2000ms"/"frame2250ms" are the unregressed responses to the
+    # 2000-ms / 2250-ms frames themselves.
     conditions: list[str] = field(default_factory=lambda: ["raw", "2000ms", "2250ms"])
     use_reliable_channels: bool = True
     source_fs: float = 1000
@@ -93,7 +95,8 @@ def parse_args() -> Cfg:
     )
     parser.add_argument("--monkeys", nargs="+", choices=tuple(MONKEY_SESSIONS))
     parser.add_argument(
-        "--conditions", nargs="+", choices=("raw", "2000ms", "2250ms", "2000ms+2250ms"),
+        "--conditions", nargs="+",
+        choices=("raw", "2000ms", "2250ms", "2000ms+2250ms", "frame2000ms", "frame2250ms"),
     )
     parser.add_argument("--n_permutations", type=int)
     parser.add_argument("--random_seed", type=int)
@@ -132,8 +135,9 @@ def parse_args() -> Cfg:
 load_condition_rdms
 Load one monkey, align the stimuli, and build the dynamic RDMs plus the static
 RDMs of every requested condition. Mirrors static_dynamic_drsa_permutation.ipynb:
-static responses are cropped, everything is resampled to new_fs, and regressed
-conditions use regress_out_static_response with cfg.regress_out_method.
+static responses are cropped, everything is resampled to new_fs, regressed
+conditions use regress_out_static_response with cfg.regress_out_method, and
+"frame2000ms"/"frame2250ms" use the unregressed 2000-ms / 2250-ms frame responses.
 
 INPUT:
     - monkey: str -> key of MONKEY_SESSIONS
@@ -181,7 +185,10 @@ def load_condition_rdms(monkey: str, cfg: Cfg):
     static_rdms = {}
     for condition in cfg.conditions:
         condition_rasters = static_resampled["raw"]
-        if condition != "raw":
+        if condition in ("frame2000ms", "frame2250ms"):
+            # Unregressed response to an earlier frame of the movie.
+            condition_rasters = static_resampled[condition.removeprefix("frame")]
+        elif condition != "raw":
             # One regression per static bin across stimuli; keep the residual.
             condition_rasters = regress_out_static_response(
                 previous_response_rasters(static_resampled, condition),
@@ -242,10 +249,15 @@ def main() -> None:
             # The full null (permutations x movie x static) is not saved.
             del null
 
-            condition_suffix = "raw" if condition == "raw" else regressed_condition_suffix(
-                condition, cfg.regress_out_method, cfg.timepoint_regression_type,
-                cfg.timepoint_cv_type, cfg.timepoint_pca_variance,
-            )
+            # Unregressed conditions keep their own name; regressed ones encode the method.
+            if condition in ("raw", "frame2000ms", "frame2250ms"):
+                condition_suffix = condition
+            else:
+                condition_suffix = regressed_condition_suffix(
+                    condition, cfg.regress_out_method, cfg.timepoint_regression_type,
+                    cfg.timepoint_cv_type, cfg.timepoint_pca_variance,
+                )
+            # end if unregressed condition
             output_path = output_dir / (
                 f"{cfg.rdm_metric}_{cfg.rsa_metric}_{condition_suffix}_"
                 f"{cfg.n_permutations}perm_seed{cfg.random_seed}.npz"
