@@ -15,7 +15,7 @@ cfg.exp_names = {
     % 'red_20260722',
     % 'red_20260723',
     % 'red_20260724',
-    'paul_20260926',
+    'paul_20261003',
 };
 
 % Keep the existing Plexon baseline convention while matching the temporal
