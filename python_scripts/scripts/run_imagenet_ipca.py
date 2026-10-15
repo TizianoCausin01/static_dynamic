@@ -18,6 +18,7 @@ from useful_stuff.general_utils import print_wise
 
 # example to run it
 # run_imagenet_ipca.py --model_name='alexnet' --pkg=torchvision --pooling=all --n_components=10 --batch_size=100 --img_size=224
+# run_imagenet_ipca.py --model_name=alexnet --pkg=torchvision --pooling=all --n_components=1000 --batch_size=1024 --img_size=224 --relevant_layers features.1
 
 parser = argparse.ArgumentParser(
     description="Fit and save ImageNet validation IncrementalPCA components for an imgANN model."
@@ -28,6 +29,10 @@ parser.add_argument("--n_components", required=True, type=int)
 parser.add_argument("--batch_size", required=True, type=int)
 parser.add_argument("--pooling")
 parser.add_argument("--img_size", type=int)
+parser.add_argument(
+    "--relevant_layers", nargs="+",
+    help="Layers to fit; defaults to the imgANN layer list of the model.",
+)
 parser.add_argument("--num-workers", type=int, default=0, help="DataLoader worker count.")
 parser.add_argument("--weights-type", default="DEFAULT", help="Weights type passed to imgANN.")
 parser.add_argument("--repo_url", type=str, default="facebook/dinov3-vitl16-pretrain-lvd1689m")
@@ -49,6 +54,11 @@ def main():
         repo_url=cfg.repo_url,
         revision=cfg.revision,
     )
+    if cfg.relevant_layers is not None:
+        # Restrict the fit to the requested layers (e.g. a ReLU missing from
+        # the default imgANN list).
+        ann.set_relevant_layers(cfg.relevant_layers)
+    # end if cfg.relevant_layers
     target_layers = ann.get_relevant_layers()
     print_wise(f"Running ImageNet iPCA for {cfg.model_name}: {len(target_layers)} layers")
 

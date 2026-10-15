@@ -16,15 +16,19 @@ Frames are always shuffled before fitting, so the incremental path never sees a
 chunk made of a single video and its running estimate stays unbiased.
 """
 
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import joblib
 import numpy as np
 import torch
 from sklearn.decomposition import PCA, IncrementalPCA
+from sklearn.pipeline import make_pipeline
+from sklearn.random_projection import SparseRandomProjection
 
 from .video_feature_extraction import (
     clear_model_cache,
+    create_layer_hooks,
     decode_selected_video_frames,
     forward_imgann,
     preprocess_frames,
@@ -102,6 +106,77 @@ def load_frame_pcas(paths, model_name, layers, dataset_name, n_components):
         raise FileNotFoundError(f"Missing frame PCA files: {missing_names}")
     # end if missing_paths
     return pcas
+# EOF
+
+
+"""
+load_imagenet_pcas
+Loads the ImageNet-validation IncrementalPCA object of every requested layer,
+so the video frames can be projected on ImageNet axes instead of frame axes.
+
+INPUT:
+    - paths: dict -> config paths dictionary containing the data root path
+    - model_name: str -> ANN model name used to compute activations
+    - layers: list[str] -> hooked ANN layer names
+    - n_components: int -> number of components used in the stored filenames
+    - pooling: str -> pooling tag of the fit; "all" = unpooled activations
+
+OUTPUT:
+    - pcas: dict[str, IncrementalPCA] -> float32 fitted objects keyed by layer
+"""
+def load_imagenet_pcas(paths, model_name, layers, n_components, pooling="all"):
+    # Imported here: feature_extraction reads config.yaml when it is imported.
+    from .feature_extraction import save_imagenet_val_ipca
+
+    pca_paths = {
+        layer: save_imagenet_val_ipca(
+            paths, model_name, layer, n_components, pooling,
+        )
+        for layer in layers
+    }
+    missing_names = [path.name for path in pca_paths.values() if not path.exists()]
+    if missing_names:
+        raise FileNotFoundError(
+            f"Missing ImageNet PCA files: {', '.join(missing_names)}"
+        )
+    # end if missing_names
+    # The ImageNet fits were saved in float64; float32 halves the resident cost.
+    return {
+        layer: cast_pca_float32(joblib.load(pca_path))
+        for layer, pca_path in pca_paths.items()
+    }
+# EOF
+
+
+"""
+truncate_pc_feature_file
+Writes a copy of a PC-projected feature file keeping only its leading
+components. PCs are ordered by explained variance, so the first k columns of
+a 1000-component projection are the top-k subspace of the same fit.
+
+INPUT:
+    - source_path: Path -> "<...>_PC<n>pool.h5" feature file
+    - target_path: Path -> output file
+    - n_keep: int -> leading components kept
+    - pooling_name: str -> pooling tag written in the output attributes
+
+OUTPUT:
+    - target_path: Path -> written file
+"""
+def truncate_pc_feature_file(source_path, target_path, n_keep, pooling_name):
+    import h5py
+
+    with h5py.File(source_path, "r") as source, h5py.File(target_path, "w") as target:
+        target.attrs.update(source.attrs)
+        target.attrs["pooling"] = pooling_name
+        target.attrs["n_components"] = n_keep
+        # One dataset per video: frames x components.
+        for video_name, features in source.items():
+            target.create_dataset(video_name, data=features[:, :n_keep])
+            target[video_name].attrs.update(features.attrs)
+        # end for video_name, features
+    # end with h5py.File
+    return target_path
 # EOF
 
 
@@ -231,6 +306,88 @@ def build_frame_buffer(
 
 
 """
+select_imagenet_val_images
+Picks a class-balanced, seeded subset of the ImageNet validation images.
+
+INPUT:
+    - imagenet_path: str | Path -> ImageNet root readable by torchvision
+    - n_per_class: int -> images kept for each of the 1000 classes
+    - seed: int -> seed of the within-class selection
+
+OUTPUT:
+    - image_paths: list[Path] -> selected image files, class by class
+"""
+def select_imagenet_val_images(imagenet_path, n_per_class, seed=0):
+    from torchvision.datasets import ImageNet
+
+    # samples is a list of (path, class index) over the 50,000 val images.
+    samples = ImageNet(root=imagenet_path, split="val").samples
+    paths_by_class = {}
+    for image_path, class_index in samples:
+        paths_by_class.setdefault(class_index, []).append(image_path)
+    # end for image_path, class_index
+    rng = np.random.default_rng(seed)
+    image_paths = []
+    for class_index in sorted(paths_by_class):
+        class_paths = sorted(paths_by_class[class_index])
+        chosen = rng.choice(len(class_paths), size=n_per_class, replace=False)
+        image_paths.extend(Path(class_paths[index]) for index in sorted(chosen))
+    # end for class_index
+    return image_paths
+# EOF
+
+
+"""
+build_image_buffer
+Loads, center-crops to a square, and preprocesses still images once.
+
+The stimulus frames are square, while ImageNet images are not and some
+processors (e.g. ViTImageProcessor) resize without cropping; the square crop
+keeps the aspect ratio the same as the frames the components are applied to.
+
+INPUT:
+    - image_paths: list[Path] -> image files
+    - preprocessor: AutoImageProcessor | transforms.Compose -> frame preprocessor
+    - pkg: str -> model package used by imgANN
+    - chunk_size: int -> images preprocessed per call
+    - dtype: torch.dtype -> storage dtype of the buffer
+    - verbose: bool -> print one progress line per chunk
+
+OUTPUT:
+    - pixel_values: torch.Tensor -> CPU tensor N x C x H x W
+"""
+def build_image_buffer(
+        image_paths, preprocessor, pkg, chunk_size=256, dtype=torch.float16,
+        verbose=True,
+        ):
+    from PIL import Image
+
+    buffers = []
+    for start in range(0, len(image_paths), chunk_size):
+        images = []
+        for image_path in image_paths[start:start + chunk_size]:
+            image = np.asarray(Image.open(image_path).convert("RGB"))
+            # Central square of side equal to the shortest edge.
+            height, width = image.shape[:2]
+            side = min(height, width)
+            top, left = (height - side) // 2, (width - side) // 2
+            images.append(image[top:top + side, left:left + side])
+        # end for image_path
+        buffers.append(preprocess_frames(images, preprocessor, pkg, "cpu", dtype))
+        if not verbose:
+            continue
+        # end if progress lines are off
+        print(
+            f"buffered images {min(start + chunk_size, len(image_paths))}"
+            f"/{len(image_paths)}",
+            flush=True,
+        )
+    # end for start
+    return torch.cat(buffers, dim=0)
+# EOF
+
+
+"""
 layer_feature_sizes
 Reads the flattened activation width of every hooked layer with one forward call.
 
@@ -243,7 +400,7 @@ OUTPUT:
 """
 def layer_feature_sizes(ann, layers):
     ann.features = {}
-    ann.create_forward_hook(layer_names=layers)
+    create_layer_hooks(ann, layers)
     try:
         with torch.inference_mode():
             proxy = torch.zeros(
@@ -581,7 +738,7 @@ def fit_frame_pca_model(
             flush=True,
         )
         ann.features = {}
-        ann.create_forward_hook(layer_names=layer_group)
+        create_layer_hooks(ann, layer_group)
         try:
             stage_paths = stage_group_activations(
                 ann, pixel_values, layer_group, feature_sizes,
@@ -614,4 +771,447 @@ def fit_frame_pca_model(
         # end try
     # end for layer_group
     return save_paths
+# EOF
+
+
+"""
+fit_layer_srp
+Builds the sparse random projection that first shrinks one wide layer.
+
+The projection is data independent, so it is "fitted" on a single zero row
+only to fix its random matrix. Layers no wider than the target are left alone.
+
+INPUT:
+    - n_features: int -> flattened width of the layer
+    - n_components: int -> width after the projection
+    - seed: int -> seed of the random matrix
+
+OUTPUT:
+    - srp: SparseRandomProjection | None -> float32 projection, or None when
+        the layer is already narrow enough
+"""
+def fit_layer_srp(n_features, n_components, seed=0):
+    if n_features <= n_components:
+        return None
+    # end if the layer is already narrow enough
+    # Fitting on float32 makes the stored sparse matrix float32 as well, so
+    # the transform keeps float32 activations in float32.
+    return SparseRandomProjection(
+        n_components=n_components, random_state=seed,
+    ).fit(np.zeros((1, n_features), dtype=np.float32))
+# EOF
+
+
+"""
+stage_image_srp_activations
+Streams images through the model and writes every layer's (optionally
+SRP-reduced) activations to one memmap per layer.
+
+Unlike stage_group_activations the images are decoded chunk by chunk, so the
+whole ImageNet validation set never has to sit in RAM as pixels; the random
+projections of the layers run in parallel threads (scipy releases the GIL).
+
+INPUT:
+    - ann: imgANN -> model wrapper with hooks already registered
+    - image_paths: list[Path] -> images to stream
+    - preprocessor: object -> frame preprocessor of the model
+    - pkg: str -> model package, selects the preprocessing call
+    - layers: list[str] -> layers of this pass
+    - srps: dict[str, SparseRandomProjection | None] -> projection per layer
+    - feature_sizes: dict[str, int] -> full flattened width per layer
+    - stage_widths: dict[str, int] -> stored width per layer
+    - forward_batch_size: int -> images per forward call
+    - stage_dir: Path -> directory receiving the temporary memmaps
+    - chunk_bytes: float -> RAM allowed for the full-width float32
+        activations of one chunk, which sets how many images are decoded at once
+    - stage_dtype: np.dtype -> stored activation dtype
+
+OUTPUT:
+    - stage_paths: dict[str, Path] -> staged activation files keyed by layer
+"""
+def stage_image_srp_activations(
+        ann, image_paths, preprocessor, pkg, layers, srps, feature_sizes,
+        stage_widths, forward_batch_size, stage_dir, chunk_bytes=2e9,
+        stage_dtype=np.float16,
+        ):
+    stage_dir = Path(stage_dir)
+    stage_dir.mkdir(parents=True, exist_ok=True)
+    n_images = len(image_paths)
+    # A chunk holds every layer at full width before the projection (about
+    # 42 MB per image for a ViT-H with 32 hooked layers), so its size follows
+    # from the memory allowed rather than from a fixed image count.
+    bytes_per_image = ACTIVATION_ITEMSIZE * sum(feature_sizes[layer] for layer in layers)
+    chunk_size = max(forward_batch_size, int(chunk_bytes // bytes_per_image))
+    stage_paths = {
+        layer: stage_dir / f"{layer.replace('/', '_')}.npy" for layer in layers
+    }
+    staged = {
+        layer: np.lib.format.open_memmap(
+            stage_paths[layer], mode="w+", dtype=stage_dtype,
+            shape=(n_images, stage_widths[layer]),
+        )
+        for layer in layers
+    }
+
+    # (rows, n_features) -> (rows, stage width) for one layer.
+    def reduce_layer(layer, features):
+        if srps[layer] is None:
+            return features
+        # end if the layer is kept at full width
+        return srps[layer].transform(features)
+    # EOF
+
+    try:
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            for start in range(0, n_images, chunk_size):
+                stop = min(start + chunk_size, n_images)
+                # N x C x H x W pixels of this chunk only.
+                chunk_pixels = build_image_buffer(
+                    image_paths[start:stop], preprocessor, pkg,
+                    chunk_size=chunk_size, verbose=False,
+                )
+                chunk_features = forward_frame_chunk(
+                    ann, chunk_pixels, layers, forward_batch_size,
+                )
+                reduced = executor.map(
+                    lambda layer: reduce_layer(layer, chunk_features[layer]),
+                    layers,
+                )
+                for layer, layer_features in zip(layers, reduced):
+                    staged[layer][start:stop] = layer_features
+                # end for layer, layer_features
+                del chunk_pixels, chunk_features
+                if stop % (chunk_size * 20) < chunk_size or stop == n_images:
+                    print(f"staged images {stop}/{n_images}", flush=True)
+                # end if a progress line is due
+            # end for start
+        # end with ThreadPoolExecutor
+    finally:
+        for layer in layers:
+            staged[layer].flush()
+            del staged[layer]
+        # end for layer
+    # end try
+    return stage_paths
+# EOF
+
+
+"""
+fit_image_srp_pca_model
+Fits and saves, for every requested layer, a sparse random projection followed
+by an exact PCA on a set of images (e.g. the whole ImageNet validation set).
+
+Wide layers are first reduced to n_srp_components random features, which makes
+the activation matrix of tens of thousands of images small enough for an
+exact in-RAM PCA instead of an IncrementalPCA. Each layer is saved as one
+sklearn Pipeline (SRP -> PCA), or as the bare PCA when the layer is no wider
+than n_srp_components, under the same filename as save_frame_pca, so
+load_frame_pcas and pca_projection use it unchanged.
+
+INPUT:
+    - paths: dict -> config paths dictionary containing the data root path
+    - ann: imgANN -> model wrapper created with pooling="all"
+    - layers: list[str] -> hooked ANN layer names in depth order
+    - image_paths: list[Path] -> images the components are fitted on
+    - preprocessor: object -> frame preprocessor of the model
+    - pkg: str -> model package, selects the preprocessing call
+    - dataset_name: str -> dataset label used in the component filenames
+    - n_srp_components: int -> width after the random projection
+    - n_components: int -> number of principal components to keep
+    - forward_batch_size: int -> images per forward call
+    - ram_budget_bytes: float -> memory allowed for an in-RAM solve
+    - disk_budget_bytes: float -> temporary disk allowed for one staged group
+    - stage_dir: Path | None -> where the staged activations are written
+    - seed: int -> seed of the random projections
+    - overwrite: bool -> refit layers whose component file already exists
+
+OUTPUT:
+    - save_paths: dict[str, Path] -> saved component files keyed by layer
+"""
+def fit_image_srp_pca_model(
+        paths, ann, layers, image_paths, preprocessor, pkg, dataset_name,
+        n_srp_components, n_components, forward_batch_size, ram_budget_bytes,
+        disk_budget_bytes, stage_dir=None, seed=0, overwrite=False,
+        ):
+    save_paths = {
+        layer: save_frame_pca(
+            paths, ann.model_name, layer, dataset_name, n_components,
+        )
+        for layer in layers
+    }
+    missing_layers = [
+        layer for layer in layers
+        if overwrite or not save_paths[layer].exists()
+    ]
+    if len(missing_layers) < len(layers):
+        print(
+            f"skipping {len(layers) - len(missing_layers)} layers with stored "
+            f"components",
+            flush=True,
+        )
+    # end if some layers are already fitted
+    if not missing_layers:
+        return save_paths
+    # end if nothing left to fit
+
+    feature_sizes = layer_feature_sizes(ann, missing_layers)
+    # One random matrix per layer; a different seed per layer keeps the
+    # projections independent across layers.
+    srps = {
+        layer: fit_layer_srp(feature_sizes[layer], n_srp_components, seed + index)
+        for index, layer in enumerate(missing_layers)
+    }
+    stage_widths = {
+        layer: min(feature_sizes[layer], n_srp_components)
+        for layer in missing_layers
+    }
+    n_images = len(image_paths)
+    stage_dir = Path(
+        stage_dir or Path(paths["data_path"]) / "models" / "frame_pca_stage"
+    )
+    layer_groups = group_layers_by_bytes(
+        missing_layers, stage_widths, n_images, disk_budget_bytes,
+        STAGE_ITEMSIZE,
+    )
+    print(
+        f"{n_images} images, {len(missing_layers)} layers, SRP to "
+        f"{n_srp_components} then {n_components} PCs\n"
+        f"staging in {stage_dir} -> {len(layer_groups)} forward pass(es)",
+        flush=True,
+    )
+
+    for group_index, layer_group in enumerate(layer_groups, start=1):
+        print(
+            f"\n--- pass {group_index}/{len(layer_groups)}: "
+            f"{len(layer_group)} layers ---",
+            flush=True,
+        )
+        ann.features = {}
+        create_layer_hooks(ann, layer_group)
+        try:
+            stage_paths = stage_image_srp_activations(
+                ann, image_paths, preprocessor, pkg, layer_group, srps,
+                feature_sizes, stage_widths, forward_batch_size, stage_dir,
+            )
+        finally:
+            ann.clear_hooks()
+            clear_model_cache(ann.device)
+        # end try
+
+        try:
+            for layer in layer_group:
+                print(f"fitting {layer}", flush=True)
+                # The staged matrix is already narrow, so this is the exact
+                # PCA whenever the RAM budget allows it.
+                pca = cast_pca_float32(fit_layer_pca(
+                    stage_paths[layer], n_components, n_components,
+                    ram_budget_bytes,
+                ))
+                projection = pca if srps[layer] is None else make_pipeline(
+                    srps[layer], pca,
+                )
+                save_paths[layer].parent.mkdir(parents=True, exist_ok=True)
+                joblib.dump(projection, save_paths[layer])
+                print(f"  saved {save_paths[layer].name}", flush=True)
+                del pca, projection
+                stage_paths[layer].unlink(missing_ok=True)
+            # end for layer
+        finally:
+            # Never leave tens of GB behind when a fit raises.
+            for path in stage_paths.values():
+                path.unlink(missing_ok=True)
+            # end for path
+        # end try
+    # end for layer_group
+    return save_paths
+# EOF
+
+
+"""
+pc_extremes_path
+Path of the file holding, for one model, the image scores on the leading PCs
+of every layer and the indices of each PC's most extreme images.
+
+INPUT:
+    - paths: dict -> config paths dictionary containing the data root path
+    - model_name: str -> ANN model name used to compute activations
+    - components_dataset: str -> dataset the components were fitted on
+    - n_components: int -> number of components used in the stored filenames
+    - image_dataset: str -> dataset whose images are scored
+
+OUTPUT:
+    - save_path: Path -> HDF5 file of the scores and extreme indices
+"""
+def pc_extremes_path(
+        paths, model_name, components_dataset, n_components, image_dataset,
+        ):
+    save_dir = Path(paths["data_path"]) / "models" / "pc_extremes"
+    file_name = (
+        f"{model_name}_{components_dataset}_{n_components}components_"
+        f"{image_dataset}_extremes.h5"
+    )
+    return save_dir / file_name
+# EOF
+
+
+"""
+leading_pc_projection
+Splits a stored layer projection into the parts needed to score images on its
+first PCs only, so the 1000-component product is never formed.
+
+INPUT:
+    - projection: Pipeline | PCA | IncrementalPCA -> stored layer projection,
+        either SRP -> PCA or a bare PCA
+    - n_pcs: int -> leading components kept
+
+OUTPUT:
+    - srp: SparseRandomProjection | None -> random projection, None if absent
+    - mean: np.ndarray -> PCA centre, shape (n_features,)
+    - components: np.ndarray -> leading components, shape (n_pcs, n_features)
+"""
+def leading_pc_projection(projection, n_pcs):
+    srp, pca = None, projection
+    if hasattr(projection, "steps"):
+        srp, pca = projection.steps[0][1], projection.steps[-1][1]
+    # end if the projection is an SRP -> PCA pipeline
+    if getattr(pca, "whiten", False):
+        raise ValueError("Whitened PCA objects are not supported.")
+    # end if whiten
+    mean = pca.mean_.astype(np.float32)
+    components = np.ascontiguousarray(pca.components_[:n_pcs], dtype=np.float32)
+    return srp, mean, components
+# EOF
+
+
+"""
+score_images_on_leading_pcs
+Runs a set of images through the model once and scores them, for every layer,
+on the leading components of that layer's stored projection.
+
+INPUT:
+    - ann: imgANN -> model wrapper created with pooling="all"
+    - layers: list[str] -> hooked ANN layer names in depth order
+    - projections: dict[str, Pipeline | PCA] -> stored projection per layer
+    - image_paths: list[Path] -> images to score
+    - preprocessor: object -> frame preprocessor of the model
+    - pkg: str -> model package, selects the preprocessing call
+    - n_pcs: int -> leading components scored per layer
+    - forward_batch_size: int -> images per forward call
+    - chunk_bytes: float -> RAM allowed for the full-width float32
+        activations of one chunk, which sets how many images are decoded at once
+
+OUTPUT:
+    - scores: dict[str, np.ndarray] -> (n_images, n_pcs) scores keyed by layer
+"""
+def score_images_on_leading_pcs(
+        ann, layers, projections, image_paths, preprocessor, pkg, n_pcs,
+        forward_batch_size, chunk_bytes=2e9,
+        ):
+    n_images = len(image_paths)
+    leading = {
+        layer: leading_pc_projection(projections[layer], n_pcs)
+        for layer in layers
+    }
+    feature_sizes = layer_feature_sizes(ann, layers)
+    bytes_per_image = ACTIVATION_ITEMSIZE * sum(feature_sizes.values())
+    chunk_size = max(forward_batch_size, int(chunk_bytes // bytes_per_image))
+    scores = {
+        layer: np.empty((n_images, n_pcs), dtype=np.float32) for layer in layers
+    }
+
+    # (rows, n_features) -> (rows, n_pcs), the first columns of pca.transform.
+    def project_layer(layer, features):
+        srp, mean, components = leading[layer]
+        if srp is not None:
+            features = srp.transform(features)
+        # end if the layer was randomly projected before its PCA
+        return (np.asarray(features, dtype=np.float32) - mean) @ components.T
+    # EOF
+
+    create_layer_hooks(ann, layers)
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        for start in range(0, n_images, chunk_size):
+            stop = min(start + chunk_size, n_images)
+            chunk_pixels = build_image_buffer(
+                image_paths[start:stop], preprocessor, pkg,
+                chunk_size=chunk_size, verbose=False,
+            )
+            chunk_features = forward_frame_chunk(
+                ann, chunk_pixels, layers, forward_batch_size,
+            )
+            projected = executor.map(
+                lambda layer: project_layer(layer, chunk_features[layer]),
+                layers,
+            )
+            for layer, layer_scores in zip(layers, projected):
+                scores[layer][start:stop] = layer_scores
+            # end for layer, layer_scores
+            del chunk_pixels, chunk_features
+            if stop % (chunk_size * 20) < chunk_size or stop == n_images:
+                print(f"scored images {stop}/{n_images}", flush=True)
+            # end if a progress line is due
+        # end for start
+    # end with ThreadPoolExecutor
+    return scores
+# EOF
+
+
+"""
+extreme_indices
+Indices of the highest and lowest scoring rows of every column.
+
+INPUT:
+    - scores: np.ndarray -> (n_images, n_pcs) scores
+    - n_extreme: int -> rows kept at each end
+
+OUTPUT:
+    - top: np.ndarray -> (n_pcs, n_extreme) indices, highest score first
+    - bottom: np.ndarray -> (n_pcs, n_extreme) indices, lowest score first
+"""
+def extreme_indices(scores, n_extreme):
+    order = np.argsort(scores, axis=0, kind="stable").T
+    return order[:, ::-1][:, :n_extreme].copy(), order[:, :n_extreme].copy()
+# EOF
+
+
+"""
+save_pc_extremes
+Writes the per-layer scores and extreme indices of one model to HDF5.
+
+Layout: one group per layer with "scores" (n_images x n_pcs), "top_indices"
+and "bottom_indices" (n_pcs x n_extreme, most extreme first), plus the scored
+image paths in "image_paths", whose order the indices refer to.
+
+INPUT:
+    - save_path: Path -> destination file
+    - scores: dict[str, np.ndarray] -> (n_images, n_pcs) scores keyed by layer
+    - image_paths: list[Path] -> scored images, in row order
+    - n_extreme: int -> images kept at each end of every PC
+    - metadata: dict -> file attributes
+
+OUTPUT:
+    - save_path: Path -> the written file
+"""
+def save_pc_extremes(save_path, scores, image_paths, n_extreme, metadata):
+    import h5py
+
+    save_path = Path(save_path)
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path = save_path.with_suffix(".tmp.h5")
+    with h5py.File(temporary_path, "w") as h5_file:
+        h5_file.attrs.update({**metadata, "n_extreme": n_extreme})
+        h5_file.create_dataset(
+            "image_paths", data=np.array([str(path) for path in image_paths], dtype="S"),
+        )
+        for layer, layer_scores in scores.items():
+            top, bottom = extreme_indices(layer_scores, n_extreme)
+            group = h5_file.create_group(layer)
+            group.create_dataset("scores", data=layer_scores)
+            group.create_dataset("top_indices", data=top)
+            group.create_dataset("bottom_indices", data=bottom)
+        # end for layer, layer_scores
+    # end with h5py.File
+    # Only a complete file ever carries the final name.
+    temporary_path.replace(save_path)
+    return save_path
 # EOF

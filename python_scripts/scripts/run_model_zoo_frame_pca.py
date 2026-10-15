@@ -13,6 +13,14 @@ import yaml
 # project root; components land in config[data_path]/models/frame_pca_components:
 # .venv/bin/python python_scripts/scripts/run_model_zoo_frame_pca.py \
 #     --model_names ijepa_vith14_1k dino_v3_h alexnet --n_components 100
+# Same fit on a class-balanced ImageNet val subset (saved as "imagenet_val"):
+# .venv/bin/python python_scripts/scripts/run_model_zoo_frame_pca.py \
+#     --model_names ijepa_vith14_1k --n_components 500 --fit_source imagenet
+# Whole ImageNet val (50 per class), SRP to 10k features then exact PCA:
+# .venv/bin/python python_scripts/scripts/run_model_zoo_frame_pca.py \
+#     --model_names alexnet ijepa_vith14_1k --n_components 1000 \
+#     --fit_source imagenet --n_imagenet_per_class 50 --n_srp_components 10000 \
+#     --disk_budget_gb 40 --overwrite
 
 
 ENV = os.getenv("MY_ENV", "tiziano_mac_mini")
@@ -28,7 +36,10 @@ sys.path.append(paths["useful_stuff_path"])
 
 from image_processing.frame_pca import (
     build_frame_buffer,
+    build_image_buffer,
     fit_frame_pca_model,
+    fit_image_srp_pca_model,
+    select_imagenet_val_images,
     selected_frames_per_video,
 )
 from image_processing.model_zoo import MODEL_ZOO, get_model_spec
@@ -44,6 +55,16 @@ from useful_stuff.image_processing.computational_models import imgANN
 class Cfg:
     model_names: list[str] | None = None
     dataset_name: str = "static_dynamic"
+    # "frames": stimulus video frames; "imagenet": ImageNet val images, saved
+    # under the "imagenet_val" dataset label.
+    fit_source: str = "frames"
+    # Images per class with fit_source="imagenet" (5 -> 5000 images, close to
+    # the ~5100 frames of the stimulus fit; 50 -> the whole validation set).
+    n_imagenet_per_class: int = 5
+    # fit_source="imagenet" only: reduce every wider layer to this many sparse
+    # random features before an exact PCA, streaming the images instead of
+    # holding them in RAM. None keeps the plain (incremental) PCA path.
+    n_srp_components: int | None = None
     stimuli_dir: str | None = None
     n_components: int = 100
     # Every third frame of the first 2.5 s at 60 fps: indices 0, 3, ..., 150.
@@ -95,6 +116,13 @@ def parse_args() -> Cfg:
         help="Registry keys; defaults to the complete model zoo.",
     )
     parser.add_argument("--dataset_name", default=Cfg.dataset_name)
+    parser.add_argument(
+        "--fit_source", choices=("frames", "imagenet"), default=Cfg.fit_source,
+    )
+    parser.add_argument(
+        "--n_imagenet_per_class", type=int, default=Cfg.n_imagenet_per_class,
+    )
+    parser.add_argument("--n_srp_components", type=int)
     parser.add_argument("--stimuli_dir")
     parser.add_argument("--n_components", type=int, default=Cfg.n_components)
     parser.add_argument("--frame_stride", type=int, default=Cfg.frame_stride)
@@ -139,6 +167,10 @@ def parse_args() -> Cfg:
         )
     # end if unknown_names
     args.model_names = model_names
+    if args.fit_source == "imagenet":
+        # The component filenames carry the fitting dataset.
+        args.dataset_name = "imagenet_val"
+    # end if fit_source is imagenet
     return Cfg(**vars(args))
 # EOF
 
@@ -177,17 +209,36 @@ def fit_image_model(spec, cfg, video_paths, device, dtype):
         ann.set_model(getattr(ann.get_model(), spec.submodule))
         ann.set_relevant_layers(spec.layers)
     # end if only one tower is hooked
+    # Read by create_layer_hooks to keep only the patch tokens.
+    ann.n_prefix_tokens = spec.n_prefix_tokens
     print(ann, flush=True)
 
     preprocessor = build_frame_preprocessor(
         spec.pkg, spec.repo_url, spec.img_size,
     )
-    max_frames = selected_frames_per_video(
-        cfg.frame_stride, cfg.last_frame_index,
-    )
-    pixel_values, _ = build_frame_buffer(
-        video_paths, preprocessor, spec.pkg, cfg.frame_stride, max_frames,
-    )
+    if cfg.fit_source == "imagenet":
+        image_paths = select_imagenet_val_images(
+            paths["imagenet_path"], cfg.n_imagenet_per_class, seed=cfg.seed,
+        )
+        if cfg.n_srp_components is not None:
+            # Streams the images chunk by chunk: no pixel buffer is built.
+            return fit_image_srp_pca_model(
+                paths, ann, spec.layers, image_paths, preprocessor, spec.pkg,
+                cfg.dataset_name, cfg.n_srp_components, cfg.n_components,
+                spec.batch_size, cfg.ram_budget_gb * 1e9,
+                cfg.disk_budget_gb * 1e9, stage_dir=cfg.stage_dir,
+                seed=cfg.seed, overwrite=cfg.overwrite,
+            )
+        # end if the random projection path is requested
+        pixel_values = build_image_buffer(image_paths, preprocessor, spec.pkg)
+    else:
+        max_frames = selected_frames_per_video(
+            cfg.frame_stride, cfg.last_frame_index,
+        )
+        pixel_values, _ = build_frame_buffer(
+            video_paths, preprocessor, spec.pkg, cfg.frame_stride, max_frames,
+        )
+    # end if cfg.fit_source
     print(
         f"frame buffer {tuple(pixel_values.shape)} "
         f"({pixel_values.numel() * pixel_values.element_size() / 1e9:.2f} GB)",

@@ -72,6 +72,9 @@ class ModelSpec:
     # Attribute of the loaded model to hook instead of the model itself, for
     # checkpoints that ship several towers (SigLIP's vision plus text).
     submodule: str | None = None
+    # Leading special tokens (CLS, registers) dropped from the unpooled
+    # activations before the PCA fit and projection, leaving patch tokens.
+    n_prefix_tokens: int = 0
     # Channel statistics for the torchvision video path; None keeps ImageNet.
     normalization_mean: tuple[float, ...] | None = None
     normalization_std: tuple[float, ...] | None = None
@@ -110,6 +113,19 @@ MODEL_ZOO = {
         family="image CNN",
         label="ConvNeXt-B",
         batch_size=32,
+    ),
+    "convnext_v2_huge": ModelSpec(
+        model_name="convnext_v2_huge",
+        repo_url="facebook/convnextv2-huge-1k-224",
+        # Same block readout as convnext_base: the V2 layer keeps drop_path as
+        # an identity on the pre-residual block output.
+        layers=stagewise_layers(
+            "encoder.stages.{stage}.layers.{block}.drop_path", (3, 3, 27, 3),
+        ),
+        modality="image",
+        family="image CNN",
+        label="ConvNeXt-V2-H",
+        batch_size=16,
     ),
 
     # --- image transformers ----------------------------------------------
@@ -151,6 +167,9 @@ MODEL_ZOO = {
         model_name="dino_v3_h",
         repo_url="facebook/dinov3-vith16plus-pretrain-lvd1689m",
         layers=blockwise_layers("layer.{block}.mlp.down_proj", 32),
+        # CLS plus 4 registers, so the PCs see only the patch tokens, like
+        # I-JEPA which has no special tokens.
+        n_prefix_tokens=5,
         modality="image",
         family="image ViT (SSL)",
         label="DINOv3-H+",

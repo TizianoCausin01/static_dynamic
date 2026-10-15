@@ -7,6 +7,8 @@ import numpy as np
 import torch
 from torchvision import transforms
 from transformers import AutoImageProcessor, AutoVideoProcessor
+from useful_stuff.general_utils.utils import get_module_by_path
+from useful_stuff.image_processing.computational_models import pool_features
 
 from .model_zoo import MODEL_ZOO
 
@@ -669,6 +671,45 @@ def forward_imgann(ann, pixel_values):
 
 
 """
+create_layer_hooks
+Registers the imgANN hooks of the requested layers. When the model carries
+leading special tokens (ann.n_prefix_tokens, set from the registry), each hook
+drops them before pooling, so only the patch tokens are kept.
+
+INPUT:
+    - ann: imgANN -> initialized model wrapper
+    - layers: list[str] -> hooked layer names
+
+OUTPUT:
+    - None
+"""
+def create_layer_hooks(ann, layers):
+    ann.create_forward_hook(layer_names=layers)
+    n_prefix_tokens = getattr(ann, "n_prefix_tokens", 0)
+    if n_prefix_tokens == 0:
+        return None
+    # end if no special tokens
+
+    def patch_token_hook(layer):
+        def hook(module, inputs, output):
+            ann.features[layer] = pool_features(
+                output[:, n_prefix_tokens:], ann.pooling,
+            )
+        # EOF
+        return hook
+    # EOF
+
+    for layer in layers:
+        ann.handles[layer].remove()
+        ann.handles[layer] = get_module_by_path(
+            ann.model, layer,
+        ).register_forward_hook(patch_token_hook(layer))
+    # end for layer
+    return None
+# EOF
+
+
+"""
 clear_model_cache
 Releases cached accelerator memory after an inference batch.
 
@@ -851,7 +892,7 @@ def extract_video_features(
 ):
     video_path = Path(video_path)
     temporary_key = f"__incomplete__{video_path.name}"
-    ann.create_forward_hook(layer_names=layers)
+    create_layer_hooks(ann, layers)
 
     for layer in layers:
         if temporary_key in feature_files[layer]:
@@ -1159,7 +1200,7 @@ def extract_sliding_video_features(
 
     video_path = Path(video_path)
     temporary_key = f"__incomplete__{video_path.name}"
-    ann.create_forward_hook(layer_names=layers)
+    create_layer_hooks(ann, layers)
     for layer in layers:
         if temporary_key in feature_files[layer]:
             del feature_files[layer][temporary_key]

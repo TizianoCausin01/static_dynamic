@@ -15,6 +15,9 @@ import yaml
 # config[data_path]/models and carries the "PCpool" tag:
 # .venv/bin/python python_scripts/scripts/run_model_zoo_pc_feature_extraction.py \
 #     --model_names ijepa_vith14_1k dino_v3_h alexnet --n_components 100
+# Projection on the ImageNet-validation components instead ("PCimagenet" tag):
+# .venv/bin/python python_scripts/scripts/run_model_zoo_pc_feature_extraction.py \
+#     --model_names alexnet --n_components 1000 --PCs_source imagenet
 
 
 ENV = os.getenv("MY_ENV", "tiziano_mac_mini")
@@ -31,6 +34,7 @@ sys.path.append(paths["useful_stuff_path"])
 from image_processing.frame_pca import (
     group_layers_by_bytes,
     load_frame_pcas,
+    load_imagenet_pcas,
     pca_projection,
 )
 from image_processing.model_zoo import MODEL_ZOO, get_model_spec
@@ -59,6 +63,9 @@ class Cfg:
     dataset_name: str = "static_dynamic"
     # Dataset the components were fitted on; defaults to dataset_name.
     PCs_dataset: str | None = None
+    # "frames": components fitted on the stimulus frames (frame_pca_components);
+    # "imagenet": IncrementalPCA fitted on ImageNet val (imagenet_components).
+    PCs_source: str = "frames"
     n_components: int = 100
     stimuli_dir: str | None = None
     output_dir: str | None = None
@@ -106,6 +113,10 @@ def parse_args() -> Cfg:
         "--PCs_dataset",
         help="Dataset used to locate the stored components; defaults to --dataset_name.",
     )
+    parser.add_argument(
+        "--PCs_source", choices=("frames", "imagenet"), default=Cfg.PCs_source,
+        help="Fit the projection axes came from.",
+    )
     parser.add_argument("--n_components", type=int, default=Cfg.n_components)
     parser.add_argument("--stimuli_dir")
     parser.add_argument("--output_dir")
@@ -138,6 +149,28 @@ def parse_args() -> Cfg:
     args.model_names = model_names
     args.PCs_dataset = args.PCs_dataset or args.dataset_name
     return Cfg(**vars(args))
+# EOF
+
+
+"""
+pooling_name
+Pooling tag of the stored features: "PC1000" for frame components and
+"PCimagenet1000" for ImageNet components, so the two never share files.
+
+INPUT:
+    - cfg: Cfg -> sweep configuration
+
+OUTPUT:
+    - tag: str -> pooling tag written in the feature filenames
+"""
+def pooling_name(cfg) -> str:
+    # ImageNet axes come either from the ImageNet IncrementalPCA objects or
+    # from frame-PCA files fitted on the "imagenet_val" subset.
+    from_imagenet = (
+        cfg.PCs_source == "imagenet" or cfg.PCs_dataset.startswith("imagenet")
+    )
+    source_tag = "imagenet" if from_imagenet else ""
+    return f"{POOLING_PREFIX}{source_tag}{cfg.n_components}"
 # EOF
 
 
@@ -176,6 +209,8 @@ def project_image_model(spec, cfg, video_paths, output_dir, device, dtype):
         ann.set_model(getattr(ann.get_model(), spec.submodule))
         ann.set_relevant_layers(spec.layers)
     # end if only one tower is hooked
+    # Read by create_layer_hooks to keep only the patch tokens.
+    ann.n_prefix_tokens = spec.n_prefix_tokens
     preprocessor = build_frame_preprocessor(
         spec.pkg, spec.repo_url, spec.img_size,
     )
@@ -207,10 +242,16 @@ def project_image_model(spec, cfg, video_paths, output_dir, device, dtype):
         # extract_video_dataset_features hooks whatever the ANN reports, so the
         # active layer list is narrowed to this group.
         ann.set_relevant_layers(layer_group)
-        pcas = load_frame_pcas(
-            paths, spec.model_name, layer_group, cfg.PCs_dataset,
-            cfg.n_components,
-        )
+        if cfg.PCs_source == "imagenet":
+            pcas = load_imagenet_pcas(
+                paths, spec.model_name, layer_group, cfg.n_components,
+            )
+        else:
+            pcas = load_frame_pcas(
+                paths, spec.model_name, layer_group, cfg.PCs_dataset,
+                cfg.n_components,
+            )
+        # end if cfg.PCs_source
         feature_transforms = {
             layer: pca_projection(pcas[layer]) for layer in layer_group
         }
@@ -226,8 +267,11 @@ def project_image_model(spec, cfg, video_paths, output_dir, device, dtype):
             compression=cfg.compression,
             overwrite=cfg.overwrite,
             feature_transforms=feature_transforms,
-            pooling_name=f"{POOLING_PREFIX}{cfg.n_components}",
-            extra_metadata={"n_components": cfg.n_components},
+            pooling_name=pooling_name(cfg),
+            extra_metadata={
+                "n_components": cfg.n_components, "PCs_source": cfg.PCs_source,
+                "n_prefix_tokens": spec.n_prefix_tokens,
+            },
         ))
         del pcas, feature_transforms
     # end for layer_group
@@ -256,7 +300,8 @@ def main() -> None:
     print(
         f"{len(video_paths)} videos from {stimuli_dir}\n"
         f"Output directory: {output_dir}\n"
-        f"Components: {cfg.n_components} fitted on {cfg.PCs_dataset}\n"
+        f"Components: {cfg.n_components} fitted on "
+        f"{'imagenet_val' if cfg.PCs_source == 'imagenet' else cfg.PCs_dataset}\n"
         f"Models: {cfg.model_names}",
         flush=True,
     )
