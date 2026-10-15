@@ -324,6 +324,9 @@ INPUT:
     - rsa_metric: str -> half-vs-half RDM similarity metric
     - condition: str -> "movie" (vid_ presentations) or "static" (last-frame
         img_ presentations)
+    - whiteners: np.ndarray | None -> time x channels x channels noise whiteners
+        (Mahalanobis RDMs with rdm_metric "sqeuclidean"); the cache file name
+        must then identify the noise model
 
 OUTPUT:
     - reliability_splits: np.ndarray -> splits x time uncorrected RDM correlations
@@ -333,7 +336,7 @@ OUTPUT:
 def load_or_compute_split_half_rdm_reliability(
         cache_path, raster_path, channel_numbers, stimuli, neural_fs,
         end_ms, source_fs, n_split_repeats, seed, rdm_metric, rsa_metric,
-        condition="movie",
+        condition="movie", whiteners=None,
         ):
     if condition not in ("movie", "static"):
         raise ValueError("condition must be 'movie' or 'static'.")
@@ -384,7 +387,7 @@ def load_or_compute_split_half_rdm_reliability(
     reliability_splits = compute_split_half_reliability(
         presentations, identities, reliability_stimuli, "rsa",
         np.random.default_rng(seed), n_split_repeats,
-        rdm_metric=rdm_metric, rsa_metric=rsa_metric,
+        rdm_metric=rdm_metric, rsa_metric=rsa_metric, whiteners=whiteners,
     )
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(

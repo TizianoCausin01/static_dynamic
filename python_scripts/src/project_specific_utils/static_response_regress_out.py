@@ -10,10 +10,12 @@ Both are channels x time x stimuli and share the same stimulus order.
 import numpy as np
 from sklearn.decomposition import PCA
 
-from useful_stuff.general_utils import TimeSeries, dyn_linear_encoding
+from useful_stuff.general_utils import TimeSeries, create_RDM, dyn_linear_encoding
 
 from .channelwise_correlation import channelwise_regress_out
-from .split_half_rsa import compute_rdm_timeseries, cross_temporal_similarity
+from .split_half_rsa import (
+    compute_rdm_timeseries, cross_temporal_similarity, whiten_rasters,
+)
 
 
 """
@@ -267,6 +269,153 @@ def timepoint_static_regress_out(
 
 
 """
+centered_norms_and_directions
+Separate every population pattern into its distance from the across-stimulus
+centroid and its unit-length direction from that centroid.
+
+INPUT:
+    - rasters: np.ndarray -> channels x time x stimuli response patterns.
+    - epsilon: float -> smallest norm accepted as a non-zero pattern.
+
+OUTPUT:
+    - norms: np.ndarray -> time x stimuli positive pattern norms.
+    - directions: np.ndarray -> channels x time x stimuli unit directions.
+"""
+def centered_norms_and_directions(rasters, epsilon=1e-12):
+    rasters = np.asarray(rasters, dtype=np.float64)
+    if rasters.ndim != 3:
+        raise ValueError("rasters must have shape channels x time x stimuli.")
+    # end if raster dimensions
+
+    # The centroid is one population pattern per timepoint, averaged over stimuli.
+    centered = rasters - rasters.mean(axis=2, keepdims=True)
+    norms = np.linalg.norm(centered, axis=0)
+    if np.any(norms <= epsilon):
+        raise ValueError(
+            "At least one centered stimulus pattern has zero or near-zero norm."
+        )
+    # end if a direction is undefined
+    directions = centered / norms[np.newaxis, :, :]
+    return norms, directions
+# EOF
+
+
+"""
+radial_direction_static_regress_out
+Regress earlier-frame response strength and pattern direction out of a target
+static response as two separate models. Strength is represented by log norm,
+while pattern direction is represented by a centred unit population vector.
+
+The direction residuals are centred over stimuli and normalized again before
+they are returned. Euclidean distances between the returned vectors therefore
+measure residual direction without reintroducing residual-vector magnitude.
+Strength residuals remain separate because there is no unique scale on which
+to combine scalar radial residuals with directional residual vectors.
+
+INPUT:
+    - predictor_rasters: np.ndarray -> frames x channels x time x stimuli, or
+        channels x time x stimuli for one earlier frame.
+    - target_rasters: np.ndarray -> channels x time x stimuli target response.
+    - regression_type: str -> useful_stuff regression type ("ridge" or "lr").
+    - alphas: tuple[float, ...] -> ridge penalties searched by RidgeCV.
+    - cv_type: str -> "kf" for out-of-fold predictions or "same" in-sample.
+    - n_splits: int -> number of stimulus folds when cv_type is "kf".
+    - shuffle: bool -> whether stimulus folds are shuffled.
+    - fit_intercept: bool -> whether both regressions include an intercept.
+    - epsilon: float -> numerical floor for vector norms and logarithms.
+
+OUTPUT:
+    - result: dict -> normalized direction residuals, log-norm residuals,
+        variance removed by both models, and their selected ridge penalties.
+"""
+def radial_direction_static_regress_out(
+        predictor_rasters, target_rasters, regression_type="ridge",
+        alphas=(1e-2, 1e-1, 1, 1e1, 1e2, 1e3, 1e4, 1e5),
+        cv_type="kf", n_splits=5, shuffle=False, fit_intercept=True,
+        epsilon=1e-12,
+        ):
+    predictor_rasters = np.asarray(predictor_rasters, dtype=np.float64)
+    target_rasters = np.asarray(target_rasters, dtype=np.float64)
+    if predictor_rasters.ndim == 3:
+        predictor_rasters = predictor_rasters[np.newaxis, :, :, :]
+    # end if one predictor frame
+    if predictor_rasters.ndim != 4 or target_rasters.ndim != 3:
+        raise ValueError(
+            "predictor_rasters must be frames x channels x time x stimuli "
+            "and target_rasters must be channels x time x stimuli."
+        )
+    # end if raster dimensions
+    if predictor_rasters.shape[1:] != target_rasters.shape:
+        raise ValueError(
+            "Every predictor frame must match the target channels, time and stimuli."
+        )
+    # end if predictor and target shapes differ
+    if epsilon <= 0:
+        raise ValueError("epsilon must be positive.")
+    # end if invalid epsilon
+
+    # Decompose the target once and every earlier frame independently.
+    target_norms, target_directions = centered_norms_and_directions(
+        target_rasters, epsilon,
+    )
+    predictor_norms = []
+    predictor_directions = []
+    for frame_rasters in predictor_rasters:
+        frame_norms, frame_directions = centered_norms_and_directions(
+            frame_rasters, epsilon,
+        )
+        predictor_norms.append(frame_norms)
+        predictor_directions.append(frame_directions)
+    # end for frame_rasters
+    predictor_norms = np.stack(predictor_norms)
+    predictor_directions = np.concatenate(predictor_directions, axis=0)
+
+    # Log norm turns multiplicative population gain into an additive quantity.
+    target_log_norms = np.log(np.maximum(target_norms, epsilon))[np.newaxis, :, :]
+    predictor_log_norms = np.log(np.maximum(predictor_norms, epsilon))
+    predicted_log_norms, norm_alphas, _ = _slicewise_regress_out(
+        predictor_log_norms, target_log_norms, regression_type, alphas,
+        cv_type, n_splits, shuffle, fit_intercept,
+    )
+    log_norm_residuals = target_log_norms - predicted_log_norms
+
+    # Regress directions only on directions, so response strength cannot enter
+    # the multivariate pattern model through either its inputs or its targets.
+    predicted_directions, direction_alphas, _ = _slicewise_regress_out(
+        predictor_directions, target_directions, regression_type, alphas,
+        cv_type, n_splits, shuffle, fit_intercept,
+    )
+    direction_residuals = target_directions - predicted_directions
+
+    # Out-of-fold residuals from different fits need not share an exact centroid.
+    # Re-centre and normalize so the final Euclidean RDM is direction-only.
+    direction_residuals -= direction_residuals.mean(axis=2, keepdims=True)
+    residual_norms = np.linalg.norm(direction_residuals, axis=0)
+    if np.any(residual_norms <= epsilon):
+        raise ValueError(
+            "At least one directional regression residual has zero or near-zero norm."
+        )
+    # end if residual direction is undefined
+    normalized_direction_residuals = (
+        direction_residuals / residual_norms[np.newaxis, :, :]
+    )
+
+    return {
+        "direction_residuals": normalized_direction_residuals,
+        "log_norm_residuals": log_norm_residuals[0],
+        "direction_variance_removed": _variance_explained(
+            target_directions, direction_residuals,
+        ),
+        "log_norm_variance_removed": _variance_explained(
+            target_log_norms, log_norm_residuals,
+        ),
+        "direction_alphas": direction_alphas,
+        "log_norm_alphas": norm_alphas,
+    }
+# EOF
+
+
+"""
 window_patterns
 Average the response inside each time window (start inclusive, end
 exclusive), turning a static timecourse into one pattern per window.
@@ -439,28 +588,123 @@ def regress_out_static_response(
 
 
 """
+regress_out_static_rdms
+Remove earlier-frame RDMs from the last-frame RDM in RDM space: at every
+static timepoint t, the last-frame RDM is regressed (OLS with intercept) on the
+RDMs of every earlier frame at t (or at t + lag for every delay-embedding lag),
+with stimulus pairs as samples, and the residual RDM is kept.
+
+INPUT:
+    - previous_rdms: list[np.ndarray] -> one static time x stimulus-pair RDM
+        timeseries per earlier frame (several frames are regressed out together).
+    - static_rdms: np.ndarray -> static time x stimulus-pair last-frame RDMs.
+    - delay_embedding_lags: tuple[int, int] | None -> inclusive sample lags,
+        e.g. (-2, 2) uses the earlier RDMs at t-2 ... t+2; times beyond the
+        response edges repeat the first / last RDM (edge padding, as in
+        _embedded_predictor_array). None uses only time t.
+
+OUTPUT:
+    - residual_rdms: np.ndarray -> static time x stimulus-pair residual RDMs.
+    - variance_removed: np.ndarray -> static time fraction of RDM variance
+        explained by the earlier-frame RDMs.
+"""
+def regress_out_static_rdms(previous_rdms, static_rdms, delay_embedding_lags=None):
+    static_rdms = np.asarray(static_rdms, dtype=np.float64)
+    n_times = static_rdms.shape[0]
+    lags = (
+        [0] if delay_embedding_lags is None
+        else range(delay_embedding_lags[0], delay_embedding_lags[1] + 1)
+    )
+    residual_rdms = np.empty_like(static_rdms)
+    variance_removed = np.empty(n_times)
+    for time_index, target_rdm in enumerate(static_rdms):
+        # Predictor times t + lag, clipped to the response (edge padding).
+        predictor_times = [min(max(time_index + lag, 0), n_times - 1) for lag in lags]
+        # stimulus pairs x (frames * lags + 1) design: earlier RDMs plus intercept.
+        design_matrix = np.column_stack(
+            [rdms[predictor_time] for rdms in previous_rdms for predictor_time in predictor_times]
+            + [np.ones_like(target_rdm)]
+        )
+        coefficients = np.linalg.lstsq(design_matrix, target_rdm, rcond=None)[0]
+        residual_rdms[time_index] = target_rdm - design_matrix @ coefficients
+        variance_removed[time_index] = 1 - residual_rdms[time_index].var() / target_rdm.var()
+    # end for time_index
+    return residual_rdms, variance_removed
+# EOF
+
+
+"""
+window_rdm_timeseries
+One RDM of an earlier-frame response averaged over a static window, repeated
+at every static timepoint so it can enter regress_out_static_rdms as a fixed
+predictor: every last-frame bin is then regressed on the same earlier-frame
+geometry. Averaging the window before building the RDM lowers its noise.
+
+INPUT:
+    - rasters: np.ndarray -> channels x static time x stimuli earlier response.
+    - fs: float -> sampling rate of rasters (Hz).
+    - window_ms: tuple[float, float] -> end-exclusive static window.
+    - rdm_metric: str -> create_RDM distance.
+
+OUTPUT:
+    - window_rdms: np.ndarray -> static time x stimulus pairs, every row the
+        same window-averaged RDM.
+"""
+def window_rdm_timeseries(rasters, fs, window_ms, rdm_metric):
+    time_ms = np.arange(rasters.shape[1]) * 1000 / fs
+    window = (time_ms >= window_ms[0]) & (time_ms < window_ms[1])
+    if not window.any():
+        raise ValueError(f"Static window {window_ms} contains no samples.")
+    # end if empty window
+    # channels x stimuli: mean response in the window, then one RDM.
+    window_rdm = create_RDM(
+        np.ascontiguousarray(rasters[:, window, :].mean(axis=1)), metric=rdm_metric,
+    )
+    return np.tile(window_rdm, (rasters.shape[1], 1))
+# EOF
+
+
+"""
 regressed_condition_suffix
 File-name token of one regressed static condition, shared by the permutation
 runner and the notebooks that load its results. The channelwise method keeps
-the historical "<frame>-signal-regressed" name.
+the historical "<frame>-signal-regressed" name; the RDM-space method is
+"<frame>-rdm-regressed", or "<frame>-rdm-lags<first>to<last>-regressed" with
+delay-embedding lags.
 
 INPUT:
     - previous_name: str -> regressed-out response, e.g. "2250ms".
-    - method: str -> "channelwise" or "timepoint".
+    - method: str -> "channelwise", "timepoint" or "rdm".
     - regression_type: str -> "lr" or "ridge" (timepoint only).
     - cv_type: str -> "kf" or "same" (timepoint only).
     - pca_variance: float | None -> PCA variance fraction (timepoint only).
+    - rdm_delay_embedding_lags: tuple[int, int] | None -> lags of the RDM-space
+        regression (rdm only); None = same timepoint only.
 
 OUTPUT:
     - suffix: str -> e.g. "2250ms-signal-regressed",
-        "2250ms-timepoint-ridge-kf-regressed" or
-        "2000ms+2250ms-timepoint-ridge-kf-pca95-regressed".
+        "2250ms-timepoint-ridge-kf-regressed",
+        "2000ms+2250ms-timepoint-ridge-kf-pca95-regressed" or
+        "2000ms+2250ms-rdm-lags-2to2-regressed" or
+        "2250ms-rdm-win100to300-regressed".
+    - rdm_window_ms: tuple[float, float] | None -> static window of the
+        window-averaged earlier RDM (rdm only); overrides the lags token.
 """
 def regressed_condition_suffix(previous_name, method="channelwise",
                                regression_type="ridge", cv_type="kf",
-                               pca_variance=None):
+                               pca_variance=None, rdm_delay_embedding_lags=None,
+                               rdm_window_ms=None):
     if method == "channelwise":
         return f"{previous_name}-signal-regressed"
+    elif method == "rdm":
+        if rdm_window_ms is not None:
+            return f"{previous_name}-rdm-win{rdm_window_ms[0]:g}to{rdm_window_ms[1]:g}-regressed"
+        # end if window-averaged predictor
+        if rdm_delay_embedding_lags is None:
+            return f"{previous_name}-rdm-regressed"
+        # end if no lags
+        first_lag, last_lag = rdm_delay_embedding_lags
+        return f"{previous_name}-rdm-lags{first_lag:d}to{last_lag:d}-regressed"
     # end if channelwise
     pca_token = "" if pca_variance is None else f"-pca{round(100 * pca_variance):d}"
     return f"{previous_name}-{method}-{regression_type}-{cv_type}{pca_token}-regressed"
@@ -472,7 +716,7 @@ regressed_static_dynamic_drsa
 Static-dynamic dRSA (movie time x static time RDM similarity) for the raw
 last-frame response and after regressing out each earlier static response
 with regress_out_static_response; the static RDMs are built from the
-residual responses.
+residual responses (or, with "rdm", regressed directly in RDM space).
 
 INPUT:
     - static_rasters: np.ndarray -> channels x static time x stimuli last frame.
@@ -484,8 +728,22 @@ INPUT:
     - rdm_metric: str -> distance metric for the neural RDMs.
     - rsa_metric: str -> "correlation" or "spearman".
     - fs: float -> sampling rate of the static responses in Hz.
-    - regress_out_method: str -> "channelwise" or "timepoint".
+    - regress_out_method: str -> "channelwise", "timepoint" or "rdm" (the
+        static RDMs are regressed on the earlier-frame RDMs with
+        regress_out_static_rdms instead of regressing the responses).
     - timepoint_kwargs: dict | None -> options of timepoint_static_regress_out.
+    - rdm_delay_embedding_lags: tuple[int, int] | None -> lags of the earlier
+        RDMs in the RDM-space regression (regress_out_static_rdms); "rdm" only.
+    - rdm_window_ms: tuple[float, float] | None -> "rdm" only: average every
+        earlier response over this static window and regress the one resulting
+        RDM per frame out of every last-frame bin (window_rdm_timeseries);
+        overrides rdm_delay_embedding_lags.
+    - static_whiteners: np.ndarray | None -> static time x channels x channels
+        noise whiteners of the last frame, applied after the regression (to the
+        raw and residual responses); with rdm_metric "sqeuclidean" the RDMs are
+        squared Mahalanobis distances
+    - dynamic_whiteners: np.ndarray | None -> movie time x channels x channels
+        noise whiteners of the movie
 
 OUTPUT:
     - drsa_by_condition: dict[str, np.ndarray] -> movie time x static time
@@ -495,8 +753,51 @@ def regressed_static_dynamic_drsa(
         static_rasters, dynamic_rasters, previous_rasters_by_name,
         rdm_metric="cosine_cnt", rsa_metric="spearman", fs=100,
         regress_out_method="channelwise", timepoint_kwargs=None,
+        rdm_delay_embedding_lags=None, rdm_window_ms=None,
+        static_whiteners=None, dynamic_whiteners=None,
         ):
+    if dynamic_whiteners is not None:
+        dynamic_rasters = whiten_rasters(dynamic_rasters, dynamic_whiteners)
+    # end if movie whitening
     dynamic_rdms = compute_rdm_timeseries(dynamic_rasters, rdm_metric)
+    if regress_out_method == "rdm":
+        if static_whiteners is not None:
+            raise NotImplementedError(
+                "RDM-space regression of Mahalanobis RDMs needs noise models of the earlier frames."
+            )
+        # end if whitening
+        # Regression on the RDMs themselves: frames stacked along the channel
+        # axis (previous_response_rasters) are split back into one RDM each.
+        static_rdms = compute_rdm_timeseries(static_rasters, rdm_metric)
+        static_rdms_by_condition = {"raw": static_rdms}
+        for previous_name, previous_rasters in previous_rasters_by_name.items():
+            frame_rasters = np.split(
+                np.asarray(previous_rasters), len(previous_rasters) // len(static_rasters), axis=0,
+            )
+            if rdm_window_ms is not None:
+                # One window-averaged RDM per frame, the same at every static bin.
+                previous_rdms = [
+                    window_rdm_timeseries(rasters, fs, rdm_window_ms, rdm_metric)
+                    for rasters in frame_rasters
+                ]
+            else:
+                previous_rdms = [
+                    compute_rdm_timeseries(rasters, rdm_metric) for rasters in frame_rasters
+                ]
+            # end if window-averaged predictor
+            static_rdms_by_condition[previous_name], _ = regress_out_static_rdms(
+                previous_rdms, static_rdms,
+                # A fixed predictor has no time axis to embed.
+                delay_embedding_lags=None if rdm_window_ms is not None else rdm_delay_embedding_lags,
+            )
+        # end for previous_name
+        return {
+            condition_name: cross_temporal_similarity(
+                dynamic_rdms, condition_rdms, metric=rsa_metric,
+            )
+            for condition_name, condition_rdms in static_rdms_by_condition.items()
+        }
+    # end if rdm regression
     # The raw last-frame response is the reference condition.
     static_rasters_by_condition = {"raw": static_rasters}
     for previous_name, previous_rasters in previous_rasters_by_name.items():
@@ -505,6 +806,13 @@ def regressed_static_dynamic_drsa(
             method=regress_out_method, timepoint_kwargs=timepoint_kwargs,
         )
     # end for previous_name
+    if static_whiteners is not None:
+        # Residuals are expressed in units of the last frame's trial noise.
+        static_rasters_by_condition = {
+            condition_name: whiten_rasters(condition_rasters, static_whiteners)
+            for condition_name, condition_rasters in static_rasters_by_condition.items()
+        }
+    # end if static whitening
     return {
         condition_name: cross_temporal_similarity(
             dynamic_rdms,

@@ -467,6 +467,40 @@ def cluster_permutation_test(
 
 
 """
+permutation_result_filename
+File name of one saved static-dynamic dRSA permutation result
+(run_static_dynamic_drsa_permutation.py). The matrix clusters depend on the
+cluster-forming threshold, so any cluster_alpha other than the original 0.05
+is written into the name; 0.05 results keep their original names.
+
+INPUT:
+    - rdm_metric: str -> neural RDM metric token (e.g. 'cosine_cnt')
+    - rsa_metric: str -> RDM comparison metric (e.g. 'spearman')
+    - condition_suffix: str -> 'raw', 'frame2000ms' or a regressed_condition_suffix token
+    - n_permutations: int -> number of stimulus permutations
+    - random_seed: int -> seed of the permutation generator
+    - cluster_alpha: float -> pointwise cluster-forming threshold of the matrix
+
+OUTPUT:
+    - filename: str -> name of the .npz result
+"""
+def permutation_result_filename(
+        rdm_metric: str,
+        rsa_metric: str,
+        condition_suffix: str,
+        n_permutations: int,
+        random_seed: int,
+        cluster_alpha: float = 0.05,
+        ) -> str:
+    cluster_token = "" if np.isclose(cluster_alpha, 0.05) else f"_clusteralpha{cluster_alpha:g}"
+    return (
+        f"{rdm_metric}_{rsa_metric}_{condition_suffix}{cluster_token}_"
+        f"{n_permutations}perm_seed{random_seed}.npz"
+    )
+# EOF
+
+
+"""
 permutation_significance_mask
 Boolean map of the significant cells of a saved permutation result, for one
 of the three corrections computed by static_dynamic_drsa_permutation.ipynb.
@@ -569,5 +603,57 @@ def curve_cluster_significance(
     significant_labels = np.flatnonzero(clusters["p_values"] < alpha) + 1
     significant = np.isin(clusters["labels"], significant_labels)
     return significant, clusters
+# EOF
+
+
+"""
+paired_sign_flip_cluster_test
+Two-sided cluster-mass test on paired differences along time, e.g. static -
+movie path length per stimulus and window. The statistic of every timebin is
+the Wilcoxon signed-rank sum across observations. Under the null of no
+condition difference each observation's labels can be swapped, so the null
+flips the sign of whole rows: one flip per observation, shared by all
+timebins, which keeps the temporal autocorrelation of the differences.
+Positive and negative clusters are tested separately, each with half of
+cluster_alpha as its forming threshold, and their p-values are doubled.
+
+INPUT:
+    - differences: np.ndarray -> (observations, time) paired differences
+    - n_permutations: int -> number of random sign flips
+    - cluster_alpha: float -> two-sided pointwise cluster-forming threshold
+    - alpha: float -> two-sided cluster-level significance level
+    - random_seed: int -> seed of the sign-flip generator
+
+OUTPUT:
+    - significant: np.ndarray -> (time,) boolean, True inside significant clusters
+    - tails: dict -> 'positive' and 'negative' outputs of cluster_permutation_test,
+        with p_values already doubled
+"""
+def paired_sign_flip_cluster_test(
+        differences: np.ndarray,
+        n_permutations: int = 10000,
+        cluster_alpha: float = 0.05,
+        alpha: float = 0.05,
+        random_seed: int = 0,
+        ) -> tuple[np.ndarray, dict]:
+    differences = np.asarray(differences, dtype=float)
+    # Signed ranks of |difference| per timebin; zero differences get sign 0.
+    signed_ranks = np.sign(differences) * rankdata(np.abs(differences), axis=0)
+    observed = signed_ranks.sum(axis=0)
+    # permutations x observations of +1 / -1; flipping a row flips its signed ranks.
+    rng = np.random.default_rng(random_seed)
+    flips = rng.choice((-1.0, 1.0), size=(n_permutations, differences.shape[0]))
+    null = flips @ signed_ranks
+    significant = np.zeros(observed.shape, dtype=bool)
+    tails = {}
+    for tail, sign in (("positive", 1), ("negative", -1)):
+        # The negative tail is the positive tail of the sign-reversed statistic.
+        clusters = cluster_permutation_test(sign * observed, sign * null, cluster_alpha / 2)
+        clusters["p_values"] = np.minimum(2 * clusters["p_values"], 1)
+        significant_labels = np.flatnonzero(clusters["p_values"] < alpha) + 1
+        significant |= np.isin(clusters["labels"], significant_labels)
+        tails[tail] = clusters
+    # end for tail, sign
+    return significant, tails
 # EOF
 

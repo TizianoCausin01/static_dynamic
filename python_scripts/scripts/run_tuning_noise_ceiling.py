@@ -31,6 +31,9 @@ from project_specific_utils.timed_frame_window_rsa import spearman_brown
 class Cfg:
     static_exp_name: str = "paul_20260901to0925"
     dynamic_exp_name: str = "paul_20260831to0927"
+    # Presentation-level image raster; None uses static_exp_name. It may lag
+    # behind the natraster when later sessions added no last-frame images.
+    static_raster_exp_name: str | None = None
     # MATLAB channel numbers are one-based and both endpoints are inclusive.
     good_channels: tuple[int, int] | None = (1, 64)
     # None uses the static session's own list in reliable_channels.yaml.
@@ -62,6 +65,7 @@ def parse_args() -> Cfg:
     )
     parser.add_argument("--static_exp_name", default=Cfg.static_exp_name)
     parser.add_argument("--dynamic_exp_name", default=Cfg.dynamic_exp_name)
+    parser.add_argument("--static_raster_exp_name", default=Cfg.static_raster_exp_name)
     parser.add_argument(
         "--good_channels", nargs=2, type=int, default=list(Cfg.good_channels),
         metavar=("FIRST", "LAST"), help="Inclusive one-based MATLAB channel range.",
@@ -197,7 +201,8 @@ def main(cfg: Cfg) -> None:
     )
 
     # Presentation-level last-frame images of the shared stimuli.
-    static_raster_path = data_dir / f"{cfg.static_exp_name}_raster_img.mat"
+    static_raster_name = cfg.static_raster_exp_name or cfg.static_exp_name
+    static_raster_path = data_dir / f"{static_raster_name}_raster_img.mat"
     image_indices, image_identities = last_frame_presentation_indices(
         load_raster_presentation_names(static_raster_path),
     )

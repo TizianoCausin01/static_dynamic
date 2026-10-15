@@ -136,6 +136,55 @@ def match_timed_static_movie_rasters(
 
 
 """
+load_last_frame_movie_rasters
+Load an image and a movie natraster on the same channels and return the
+aligned last-frame static and movie responses at the source sampling rate.
+
+INPUT:
+    - static_path: Path -> image-session natraster .mat file
+    - movie_path: Path -> movie-session natraster .mat file
+    - good_channels: tuple[int, int] | None -> inclusive one-based channel range
+    - reliable_channels_config: Path | None -> reliable-channel YAML; None keeps all
+    - reliable_channels_key: str | None -> dataset key inside that YAML
+    - static_crop_ms: float | None -> keep the first static_crop_ms of the static
+        response; None keeps it whole
+    - source_fs: float -> natraster sampling frequency in Hz
+
+OUTPUT:
+    - static_rasters: np.ndarray -> channels x time x stimuli last-frame response
+    - movie_rasters: np.ndarray -> channels x time x stimuli movie response
+    - shared_stimuli: list[str] -> stimulus identities in the aligned order
+"""
+def load_last_frame_movie_rasters(
+        static_path, movie_path, good_channels=None,
+        reliable_channels_config=None, reliable_channels_key=None,
+        static_crop_ms=None, source_fs=1000,
+        ):
+    channel_kwargs = {
+        "good_channels": good_channels,
+        "reliable_channels_config": reliable_channels_config,
+        "reliable_channels_key": reliable_channels_key,
+        "return_channel_numbers": True,
+    }
+    static_rasters, static_names, static_channels = load_natraster(static_path, **channel_kwargs)
+    movie_rasters, movie_names, movie_channels = load_natraster(movie_path, **channel_kwargs)
+    if not np.array_equal(static_channels, movie_channels):
+        raise ValueError("The image and movie sessions retained different channels.")
+    # end if channel numbers differ
+    last_frame_rasters, movie_rasters, _, _, shared_stimuli, _ = (
+        match_timed_static_movie_rasters(
+            static_rasters, static_names, movie_rasters, movie_names,
+        )
+    )
+    if static_crop_ms is not None:
+        static_crop_samples = int(round(static_crop_ms * source_fs / 1000))
+        last_frame_rasters = last_frame_rasters[:, :static_crop_samples, :]
+    # end if static_crop_ms
+    return last_frame_rasters, movie_rasters, shared_stimuli
+# EOF
+
+
+"""
 min_max_normalization
 Normalizes every neural channel to [0, 1] using all non-channel dimensions.
 Optional reference data allows multiple arrays to share the same channel bounds.

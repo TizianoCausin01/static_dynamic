@@ -26,19 +26,24 @@ sys.path.append(paths["useful_stuff_path"])
 
 from project_specific_utils import (
     cluster_permutation_test, compute_rdm_timeseries, load_natraster,
-    match_timed_static_movie_rasters, permutation_p_values,
-    permuted_cross_temporal_similarity, previous_response_rasters,
-    regress_out_static_response, regressed_condition_suffix,
+    match_timed_static_movie_rasters, permutation_p_values, permutation_result_filename,
+    load_or_compute_noise_whiteners, mahalanobis_metric_token,
+    noise_whitener_cache_path, permuted_cross_temporal_similarity,
+    previous_response_rasters, regress_out_static_rdms, regress_out_static_response,
+    regressed_condition_suffix, whiten_rasters, window_rdm_timeseries,
 )
 from project_specific_utils.last_frame_decay import resample_array
 
 
 # Same sessions as MONKEY_SESSIONS in all_monkeys_presentation.ipynb:
-# (dynamic session, static session, channel range, reliable-channel key).
+# (dynamic session, static session, channel range, reliable-channel key,
+# presentation-level image raster session used for the Mahalanobis noise).
+# Paul's 1003 session added only 2000/2250-ms frames, so its last frames (and
+# their noise) are those of the 0925 image raster.
 MONKEY_SESSIONS = {
-    "baby1": ("baby1_260716to0928", "baby1_260718to0727", (84, 186), "baby1_260718to0727"),
-    "paul": ("paul_20260831to0927", "paul_20260901to0925", (1, 64), "paul_20260901to0925"),
-    "red": ("red_20260720to0928", "red_20260726to0925", (1, 64), "red_20260726to0925"),
+    "baby1": ("baby1_260716to0928", "baby1_260718to0727", (84, 186), "baby1_260718to0727", "baby1_260718to0727"),
+    "paul": ("paul_20260831to0927", "paul_20260901to1003", (1, 64), "paul_20260901to0925", "paul_20260901to0925"),
+    "red": ("red_20260720to0928", "red_20260726to0925", (1, 64), "red_20260726to0925", "red_20260726to0925"),
 }
 
 
@@ -54,12 +59,18 @@ class Cfg:
     source_fs: float = 1000
     new_fs: float = 100
     static_crop_ms: float = 1000
+    # Any create_RDM metric, or "mahalanobis": whiten with the time-resolved
+    # within-stimulus noise covariance (separate for image and movie, from the
+    # presentation-level rasters) and take squared Euclidean distances.
     rdm_metric: str = "cosine_cnt"
+    mahalanobis_shrinkage: float = 0.1
     rsa_metric: str = "spearman"
     n_permutations: int = 10000
     random_seed: int = 0
     n_jobs: int = 1
     alpha: float = 0.05
+    # Pointwise null percentile (1 - cluster_alpha) that a matrix cell must
+    # exceed to join a cluster; values other than 0.05 are in the file name.
     cluster_alpha: float = 0.05
     # Static window (ms from image onset) of the best-static-match curves: for
     # every permutation, the max over these static bins at each movie bin is
@@ -67,8 +78,17 @@ class Cfg:
     best_static_window_ms: tuple[float, float] = (0, 1000)
     # "channelwise": each channel on its own earlier response (in-sample OLS);
     # "timepoint": each channel on all delay-embedded channels, one model per
-    # static timepoint (timepoint_static_regress_out).
+    # static timepoint (timepoint_static_regress_out); "rdm": the last-frame
+    # RDM regressed on the earlier-frame RDM(s) across stimulus pairs, one OLS
+    # per static timepoint (regress_out_static_rdms).
     regress_out_method: str = "channelwise"
+    # "rdm" only: the earlier RDMs at t + lag for every lag in this inclusive
+    # range enter the OLS (edge-padded); None = same timepoint only.
+    rdm_delay_embedding_lags: tuple[int, int] | None = None
+    # "rdm" only: average each earlier response over this static window (ms),
+    # build one RDM per earlier frame and regress it out of every last-frame
+    # bin; None = time-resolved earlier RDMs (with rdm_delay_embedding_lags).
+    rdm_window_ms: tuple[float, float] | None = None
     timepoint_regression_type: str = "ridge"  # "lr" or "ridge"
     timepoint_cv_type: str = "kf"  # "kf" out-of-fold residuals, "same" in-sample
     timepoint_n_splits: int = 5
@@ -98,6 +118,11 @@ def parse_args() -> Cfg:
         "--conditions", nargs="+",
         choices=("raw", "2000ms", "2250ms", "2000ms+2250ms", "frame2000ms", "frame2250ms"),
     )
+    parser.add_argument(
+        "--rdm_metric",
+        help="Neural RDM distance, e.g. cosine_cnt, euclidean or mahalanobis.",
+    )
+    parser.add_argument("--mahalanobis_shrinkage", type=float)
     parser.add_argument("--n_permutations", type=int)
     parser.add_argument("--random_seed", type=int)
     parser.add_argument("--n_jobs", type=int)
@@ -106,7 +131,15 @@ def parse_args() -> Cfg:
         "--best_static_window_ms", type=float, nargs=2,
         help="Static window (ms) maximised over for the best-static-match null curves.",
     )
-    parser.add_argument("--regress_out_method", choices=("channelwise", "timepoint"))
+    parser.add_argument("--regress_out_method", choices=("channelwise", "timepoint", "rdm"))
+    parser.add_argument(
+        "--rdm_delay_embedding_lags", type=int, nargs=2,
+        help="First and last sample lag of the earlier RDMs (rdm method), e.g. -2 2.",
+    )
+    parser.add_argument(
+        "--rdm_window_ms", type=float, nargs=2,
+        help="Static window (ms) averaged into one earlier-frame RDM (rdm method), e.g. 100 300.",
+    )
     parser.add_argument("--timepoint_regression_type", choices=("lr", "ridge"))
     parser.add_argument("--timepoint_cv_type", choices=("kf", "same"))
     parser.add_argument("--timepoint_n_splits", type=int)
@@ -126,7 +159,13 @@ def parse_args() -> Cfg:
     cfg.best_static_window_ms = tuple(cfg.best_static_window_ms)
     if cfg.timepoint_delay_embedding_lags is not None:
         cfg.timepoint_delay_embedding_lags = tuple(cfg.timepoint_delay_embedding_lags)
+    # end if timepoint lags given
+    if cfg.rdm_delay_embedding_lags is not None:
+        cfg.rdm_delay_embedding_lags = tuple(cfg.rdm_delay_embedding_lags)
     # end if lags given
+    if cfg.rdm_window_ms is not None:
+        cfg.rdm_window_ms = tuple(cfg.rdm_window_ms)
+    # end if window given
     return cfg
 # EOF
 
@@ -150,7 +189,7 @@ OUTPUT:
     - channel_numbers: np.ndarray -> retained one-based MATLAB channels
 """
 def load_condition_rdms(monkey: str, cfg: Cfg):
-    dynamic_name, static_name, good_channels, reliable_key = MONKEY_SESSIONS[monkey]
+    dynamic_name, static_name, good_channels, reliable_key, static_raster_name = MONKEY_SESSIONS[monkey]
     data_dir = Path(paths["data_path"]) / "data"
     channel_kwargs = {
         "good_channels": good_channels,
@@ -182,12 +221,77 @@ def load_condition_rdms(monkey: str, cfg: Cfg):
             ("2250ms", image_2250ms_rasters),
         )
     }
+    # Mahalanobis: one noise model for the last frame, one for the movie.
+    rdm_metric = cfg.rdm_metric
+    static_whiteners = dynamic_whiteners = None
+    if cfg.rdm_metric == "mahalanobis":
+        whitener_kwargs = {
+            "channel_numbers": channel_numbers, "stimuli": shared_stimuli,
+            "neural_fs": cfg.new_fs, "source_fs": cfg.source_fs,
+            "shrinkage": cfg.mahalanobis_shrinkage,
+        }
+        static_whiteners, _ = load_or_compute_noise_whiteners(
+            noise_whitener_cache_path(
+                PROJECT_ROOT / "results", static_raster_name, "static",
+                cfg.mahalanobis_shrinkage, cfg.new_fs,
+            ),
+            data_dir / f"{static_raster_name}_raster_img.mat",
+            end_ms=cfg.static_crop_ms, condition="static", **whitener_kwargs,
+        )
+        dynamic_whiteners, _ = load_or_compute_noise_whiteners(
+            noise_whitener_cache_path(
+                PROJECT_ROOT / "results", dynamic_name, "movie",
+                cfg.mahalanobis_shrinkage, cfg.new_fs,
+            ),
+            data_dir / f"{dynamic_name}_raster_vid.mat",
+            end_ms=dynamic_rasters.shape[1] * 1000 / cfg.source_fs, condition="movie",
+            **whitener_kwargs,
+        )
+        # Squared Euclidean distance between whitened patterns = squared Mahalanobis.
+        rdm_metric = "sqeuclidean"
+    # end if mahalanobis
     static_rdms = {}
     for condition in cfg.conditions:
         condition_rasters = static_resampled["raw"]
         if condition in ("frame2000ms", "frame2250ms"):
+            if static_whiteners is not None:
+                raise NotImplementedError(
+                    "Mahalanobis RDMs of the 2000/2250-ms frames need their own noise model."
+                )
+            # end if mahalanobis frame condition
             # Unregressed response to an earlier frame of the movie.
             condition_rasters = static_resampled[condition.removeprefix("frame")]
+        elif condition != "raw" and cfg.regress_out_method == "rdm":
+            if static_whiteners is not None:
+                raise NotImplementedError(
+                    "RDM-space regression of Mahalanobis RDMs needs noise models of the earlier frames."
+                )
+            # end if mahalanobis rdm regression
+            # One OLS per static bin across stimulus pairs on the RDMs themselves;
+            # with rdm_window_ms every bin gets the same window-averaged RDM(s),
+            # one per earlier frame.
+            if cfg.rdm_window_ms is not None:
+                previous_rdms = [
+                    window_rdm_timeseries(
+                        static_resampled[frame], cfg.new_fs, cfg.rdm_window_ms, rdm_metric,
+                    )
+                    for frame in condition.split("+")
+                ]
+            else:
+                previous_rdms = [
+                    compute_rdm_timeseries(static_resampled[frame], rdm_metric)
+                    for frame in condition.split("+")
+                ]
+            # end if window-averaged predictor
+            static_rdms[condition], _ = regress_out_static_rdms(
+                previous_rdms,
+                compute_rdm_timeseries(static_resampled["raw"], rdm_metric),
+                # A fixed predictor has no time axis to embed.
+                delay_embedding_lags=(
+                    None if cfg.rdm_window_ms is not None else cfg.rdm_delay_embedding_lags
+                ),
+            )
+            continue
         elif condition != "raw":
             # One regression per static bin across stimuli; keep the residual.
             condition_rasters = regress_out_static_response(
@@ -204,11 +308,17 @@ def load_condition_rdms(monkey: str, cfg: Cfg):
                 },
             )
         # end if regressed condition
-        static_rdms[condition] = compute_rdm_timeseries(condition_rasters, cfg.rdm_metric)
+        if static_whiteners is not None:
+            # Residuals are expressed in units of the last frame's trial noise.
+            condition_rasters = whiten_rasters(condition_rasters, static_whiteners)
+        # end if whitening
+        static_rdms[condition] = compute_rdm_timeseries(condition_rasters, rdm_metric)
     # end for condition
-    dynamic_rdms = compute_rdm_timeseries(
-        resample_array(dynamic_rasters, cfg.source_fs, cfg.new_fs), cfg.rdm_metric,
-    )
+    dynamic_resampled = resample_array(dynamic_rasters, cfg.source_fs, cfg.new_fs)
+    if dynamic_whiteners is not None:
+        dynamic_resampled = whiten_rasters(dynamic_resampled, dynamic_whiteners)
+    # end if whitening
+    dynamic_rdms = compute_rdm_timeseries(dynamic_resampled, rdm_metric)
     return dynamic_rdms, static_rdms, shared_stimuli, channel_numbers
 # EOF
 
@@ -216,7 +326,7 @@ def load_condition_rdms(monkey: str, cfg: Cfg):
 def main() -> None:
     cfg = parse_args()
     for monkey in cfg.monkeys:
-        dynamic_name, static_name, _, _ = MONKEY_SESSIONS[monkey]
+        dynamic_name, static_name, _, _, _ = MONKEY_SESSIONS[monkey]
         output_dir = (
             PROJECT_ROOT / "results" / "static_dynamic_drsa_permutation"
             / f"{dynamic_name}_vs_{static_name}"
@@ -256,11 +366,18 @@ def main() -> None:
                 condition_suffix = regressed_condition_suffix(
                     condition, cfg.regress_out_method, cfg.timepoint_regression_type,
                     cfg.timepoint_cv_type, cfg.timepoint_pca_variance,
+                    cfg.rdm_delay_embedding_lags, cfg.rdm_window_ms,
                 )
             # end if unregressed condition
-            output_path = output_dir / (
-                f"{cfg.rdm_metric}_{cfg.rsa_metric}_{condition_suffix}_"
-                f"{cfg.n_permutations}perm_seed{cfg.random_seed}.npz"
+            # Mahalanobis results carry their shrinkage in the metric token.
+            metric_token = (
+                mahalanobis_metric_token(cfg.mahalanobis_shrinkage)
+                if cfg.rdm_metric == "mahalanobis" else cfg.rdm_metric
+            )
+            # Non-default cluster_alpha values get their own file name.
+            output_path = output_dir / permutation_result_filename(
+                metric_token, cfg.rsa_metric, condition_suffix,
+                cfg.n_permutations, cfg.random_seed, cfg.cluster_alpha,
             )
             # Same keys as static_dynamic_drsa_permutation.ipynb.
             np.savez_compressed(

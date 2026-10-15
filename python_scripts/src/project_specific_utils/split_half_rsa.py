@@ -72,6 +72,54 @@ def average_presentations(
 
 
 """
+average_subsampled_presentations
+Average the same requested number of randomly selected presentations for every
+stimulus while preserving a requested stimulus order.
+
+INPUT:
+    - rasters: np.ndarray -> channels x time x presentations.
+    - presentation_identities: list[str] -> identity for every presentation.
+    - stimulus_order: list[str] -> identities retained in the output.
+    - repetitions_per_stimulus: int -> presentations drawn without replacement.
+    - rng: np.random.Generator -> random generator controlling the draw.
+
+OUTPUT:
+    - stimulus_means: np.ndarray -> channels x time x stimuli matched-trial means.
+"""
+def average_subsampled_presentations(
+        rasters, presentation_identities, stimulus_order,
+        repetitions_per_stimulus, rng,
+        ):
+    rasters = np.asarray(rasters)
+    if rasters.ndim != 3 or rasters.shape[2] != len(presentation_identities):
+        raise ValueError(
+            "rasters and presentation_identities must describe matching presentations."
+        )
+    # end if input shapes
+    if repetitions_per_stimulus < 1:
+        raise ValueError("repetitions_per_stimulus must be positive.")
+    # end if invalid repetition count
+
+    identity_array = np.asarray(presentation_identities)
+    stimulus_means = []
+    for identity in stimulus_order:
+        stimulus_indices = np.flatnonzero(identity_array == identity)
+        if len(stimulus_indices) < repetitions_per_stimulus:
+            raise ValueError(
+                f"Stimulus {identity!r} has {len(stimulus_indices)} presentations; "
+                f"cannot draw {repetitions_per_stimulus}."
+            )
+        # end if too few presentations
+        selected_indices = rng.choice(
+            stimulus_indices, size=repetitions_per_stimulus, replace=False,
+        )
+        stimulus_means.append(rasters[:, :, selected_indices].mean(axis=2))
+    # end for identity
+    return np.stack(stimulus_means, axis=2)
+# EOF
+
+
+"""
 average_repetition_halves
 Randomly divide each stimulus's repetitions and average the two independent
 halves while preserving a requested stimulus order.
@@ -150,6 +198,30 @@ def compute_rdm_timeseries(rasters: np.ndarray, metric: str) -> np.ndarray:
         create_RDM(np.ascontiguousarray(rasters[:, time_index, :]), metric=metric)
         for time_index in range(rasters.shape[1])
     ])
+# EOF
+
+
+"""
+whiten_rasters
+Apply one channel-whitening matrix per timepoint (noise normalization), so
+that squared Euclidean distances between the whitened stimulus patterns are
+squared Mahalanobis distances.
+
+INPUT:
+    - rasters: np.ndarray -> channels x time x stimuli
+    - whiteners: np.ndarray -> time x channels x channels symmetric Sigma_t^(-1/2)
+
+OUTPUT:
+    - whitened: np.ndarray -> channels x time x stimuli whitened patterns
+"""
+def whiten_rasters(rasters: np.ndarray, whiteners: np.ndarray) -> np.ndarray:
+    rasters = np.asarray(rasters, dtype=np.float64)
+    whiteners = np.asarray(whiteners, dtype=np.float64)
+    if whiteners.shape != (rasters.shape[1], rasters.shape[0], rasters.shape[0]):
+        raise ValueError("whiteners must be time x channels x channels of the rasters.")
+    # end if shapes differ
+    # out[:, t, s] = W_t @ x[:, t, s] at every timepoint t.
+    return np.einsum("tij,jts->its", whiteners, rasters)
 # EOF
 
 
@@ -300,6 +372,9 @@ INPUT:
     - rsa_metric: str -> correlation or spearman RDM similarity
     - feature_centering: bool -> center each feature across stimuli after averaging
     - return_stimulus_std: bool -> return raw-correlation SD across stimuli
+    - whiteners: np.ndarray | None -> time x channels x channels noise whiteners
+        applied to both halves before the RDMs (rsa only; use rdm_metric
+        "sqeuclidean" for squared Mahalanobis RDMs)
 
 OUTPUT:
     - reliability: np.ndarray -> split repetition x time correlations
@@ -316,6 +391,7 @@ def compute_split_half_reliability(
         rsa_metric: str = "correlation",
         feature_centering: bool = False,
         return_stimulus_std: bool = False,
+        whiteners: np.ndarray | None = None,
         ) -> np.ndarray | tuple[np.ndarray, np.ndarray]:
     if analysis_type not in {"raw", "rsa"}:
         raise ValueError("analysis_type must be 'raw' or 'rsa'.")
@@ -356,6 +432,11 @@ def compute_split_half_reliability(
                 stimulus_stds.append(np.nanstd(stimulus_reliability, axis=0))
             # end if return_stimulus_std
         else:
+            if whiteners is not None:
+                # Same full-data noise model for both halves.
+                first_half = whiten_rasters(first_half, whiteners)
+                second_half = whiten_rasters(second_half, whiteners)
+            # end if whitening
             first_rdms = compute_rdm_timeseries(first_half, rdm_metric)
             second_rdms = compute_rdm_timeseries(second_half, rdm_metric)
             split_reliability = rowwise_similarity(
