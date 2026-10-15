@@ -1152,3 +1152,54 @@ def plot_trajectory_band_2d(
     axis.autoscale_view()
     return collection
 # EOF
+
+
+"""
+unit_length
+Scale every vector along one axis to unit Euclidean norm, e.g. every
+timepoint's population pattern across channels.
+
+INPUT:
+    - vectors: np.ndarray -> array holding the vectors along axis
+    - axis: int -> axis of the vector entries (e.g. channels)
+
+OUTPUT:
+    - unit_vectors: np.ndarray -> same shape, unit norm along axis
+"""
+def unit_length(vectors, axis):
+    norms = np.linalg.norm(vectors, axis=axis, keepdims=True)
+    # Silent timepoints (zero vector) stay zero instead of becoming NaN.
+    return vectors / np.where(norms > 0, norms, 1)
+# EOF
+
+
+"""
+sliding_path_lengths
+Path length of every trajectory in sliding windows: the sum of the Euclidean
+step lengths ||x(t+1) - x(t)|| over the steps inside each window.
+
+INPUT:
+    - trajectories: np.ndarray -> trajectories x time x dimensions (e.g.
+        stimuli x time x channels)
+    - fs: float -> sampling frequency in Hz
+    - window_starts_ms: np.ndarray -> window starts, from the first sample
+    - window_width_ms: float -> window width; a window holds
+        round(width * fs / 1000) steps, so it spans exactly its width
+
+OUTPUT:
+    - path_lengths: np.ndarray -> trajectories x windows
+"""
+def sliding_path_lengths(trajectories, fs, window_starts_ms, window_width_ms):
+    # trajectories x (time - 1) step lengths.
+    step_lengths = np.linalg.norm(np.diff(trajectories, axis=1), axis=2)
+    width_steps = int(round(window_width_ms * fs / 1000))
+    start_steps = np.round(np.asarray(window_starts_ms) * fs / 1000).astype(int)
+    if start_steps.min() < 0 or start_steps.max() + width_steps > step_lengths.shape[1]:
+        raise ValueError("Every window must lie inside the trajectories.")
+    # end if window outside the trajectories
+    # Cumulative sums turn every window sum into one difference.
+    cumulative = np.concatenate(
+        [np.zeros((step_lengths.shape[0], 1)), np.cumsum(step_lengths, axis=1)], axis=1,
+    )
+    return cumulative[:, start_steps + width_steps] - cumulative[:, start_steps]
+# EOF

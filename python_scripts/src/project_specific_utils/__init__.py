@@ -5,7 +5,7 @@ __all__ = [
     'load_img_natraster', 'decode_matlab_strings', 'min_max_normalization',
     'load_natraster', 'load_raster', 'match_static_dynamic_rasters',
     'load_binned_raster', 'load_raster_presentation_names',
-    'match_timed_static_movie_rasters',
+    'match_timed_static_movie_rasters', 'load_last_frame_movie_rasters',
     'select_stimulus_rasters',
     'channel_selection_name', 'compute_channel_selectivity_reliability',
     'last_frame_presentation_indices', 'load_reliable_channels',
@@ -13,7 +13,8 @@ __all__ = [
     'summarize_channel_reliability',
     'channelwise_regress_out', 'channelwise_static_dynamic_correlation',
     'channelwise_lag_curves',
-    'average_presentations', 'average_repetition_halves', 'compute_rdm_timeseries',
+    'average_presentations', 'average_repetition_halves',
+    'average_subsampled_presentations', 'compute_rdm_timeseries',
     'compute_split_half_reliability', 'cross_temporal_similarity',
     'raw_cross_temporal_similarity', 'rowwise_similarity',
     'split_half_filename_suffix',
@@ -49,15 +50,20 @@ __all__ = [
     'cross_temporal_tail_ttest', 'plot_static_dynamic_matrix',
     'rdm_tail_timecourses', 'select_tail_indices', 'select_tail_values',
     'depth_latency_score', 'last_frame_residual_similarity',
-    'regress_out_rdm', 'summarize_layer_timing',
+    'regress_out_features', 'regress_out_rdm', 'summarize_layer_timing',
     'pooled_static_regress_out', 'timepoint_static_regress_out',
+    'centered_norms_and_directions', 'radial_direction_static_regress_out',
     'window_model_timecourses', 'window_patterns',
     'window_static_regress_out',
     'model_frame_similarity_by_layer', 'permutation_significance_mask',
+    'permutation_result_filename',
     'plot_significance_masked_matrix', 'regressed_static_dynamic_drsa',
     'remove_small_significant_regions', 'regress_out_static_response',
-    'regressed_condition_suffix', 'previous_response_rasters',
-    'curve_cluster_significance', 'plot_significance_bars', 'plot_trajectory_band_2d',
+    'regressed_condition_suffix', 'previous_response_rasters', 'window_rdm_timeseries',
+    'whiten_rasters', 'noise_whiteners', 'load_or_compute_noise_whiteners',
+    'mahalanobis_metric_token', 'noise_whitener_cache_path',
+    'curve_cluster_significance', 'paired_sign_flip_cluster_test',
+    'plot_significance_bars', 'plot_trajectory_band_2d',
     'save_config_snapshot', 'yaml_safe',
     'CompactScientificFormatter', 'use_compact_scientific_ticks',
 ]
@@ -76,18 +82,20 @@ from .dataloader import (
     decode_matlab_strings, imagenet_val_dataloader, load_img_natraster,
     load_binned_raster, load_natraster, load_raster,
     load_raster_presentation_names, map_image_order_from_ann_to_monkey,
-    match_static_dynamic_rasters, match_timed_static_movie_rasters,
-    min_max_normalization, select_stimulus_rasters,
+    load_last_frame_movie_rasters, match_static_dynamic_rasters,
+    match_timed_static_movie_rasters, min_max_normalization,
+    select_stimulus_rasters,
 )
 from .time_series_regression import (
     autoregressive_regress_out, cross_temporal_static_dynamic_regression,
-    static_pattern_regress_out,
+    encoding_timecourse, static_pattern_regress_out,
 )
 from .split_half_rsa import (
-    average_presentations, average_repetition_halves, compute_rdm_timeseries,
+    average_presentations, average_repetition_halves,
+    average_subsampled_presentations, compute_rdm_timeseries,
     compute_split_half_reliability, cross_temporal_similarity,
     raw_cross_temporal_similarity, rowwise_similarity,
-    split_half_filename_suffix,
+    split_half_filename_suffix, whiten_rasters,
 )
 from .tuning_curves import (
     bootstrap_rowwise_orthogonal_slopes, rowwise_orthogonal_regression,
@@ -125,8 +133,8 @@ from .rdm_permutation_control import (
     latency_profile_smoothness, permute_rdm_entries, permuted_static_rsa,
     prepare_static_neural_rdms, static_model_rdms_by_layer,
     cluster_permutation_test, condensed_permutation_index,
-    curve_cluster_significance,
-    permutation_p_values, permutation_significance_mask,
+    curve_cluster_significance, paired_sign_flip_cluster_test,
+    permutation_p_values, permutation_result_filename, permutation_significance_mask,
     permuted_cross_temporal_similarity, remove_small_significant_regions,
     standardize_rdm_rows,
 )
@@ -142,13 +150,24 @@ from .static_dynamic_magnitude import (
 )
 from .last_frame_residual_hierarchy import (
     depth_latency_score, last_frame_residual_similarity,
-    model_frame_similarity_by_layer, regress_out_rdm, summarize_layer_timing,
+    model_frame_similarity_by_layer, regress_out_features,
+    regress_out_features_ridge, regress_out_rdm,
+    static_bin_similarity_by_window, summarize_layer_timing,
 )
 from .static_response_regress_out import (
-    pooled_static_regress_out, previous_response_rasters,
-    regress_out_static_response,
-    regressed_condition_suffix, regressed_static_dynamic_drsa,
+    centered_norms_and_directions, pooled_static_regress_out,
+    previous_response_rasters,
+    radial_direction_static_regress_out,
+    regress_out_static_rdms, regress_out_static_response,
+    regressed_condition_suffix, regressed_static_dynamic_drsa, window_rdm_timeseries,
     timepoint_static_regress_out, window_model_timecourses, window_patterns, window_static_regress_out,
 )
 from .config_snapshot import save_config_snapshot, yaml_safe
-from .plot_utils import CompactScientificFormatter, use_compact_scientific_ticks
+from .plot_utils import (
+    CompactScientificFormatter, plot_depth_latency_points,
+    plot_layer_curves_with_centroids, use_compact_scientific_ticks,
+)
+from .noise_normalization import (
+    load_or_compute_noise_whiteners, mahalanobis_metric_token,
+    noise_whitener_cache_path, noise_whiteners,
+)

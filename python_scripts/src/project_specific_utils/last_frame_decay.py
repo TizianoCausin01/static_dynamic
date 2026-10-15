@@ -107,6 +107,8 @@ INPUT:
     - new_fs: float -> neural analysis sampling frequency in Hz
     - good_channels: tuple[int, int] | None -> inclusive one-based channel range
     - center_neural_trials: bool -> center every neural feature over axis 2
+    - channel_subset: list[int] | None -> optional one-based channels (e.g. the
+      reliable-channel list) intersected with good_channels
 
 OUTPUT:
     - data: dict -> aligned arrays, stimulus names, sampling rates, and metadata
@@ -120,6 +122,7 @@ def load_last_frame_decay_data(
         new_fs=100,
         good_channels=None,
         center_neural_trials=False,
+        channel_subset=None,
         ):
     static_rasters, static_names = load_natraster(static_path)
     dynamic_rasters, dynamic_names = load_natraster(dynamic_path)
@@ -137,19 +140,26 @@ def load_last_frame_decay_data(
         dynamic_names,
     )
 
+    channel_numbers = np.arange(1, dynamic_rasters.shape[0] + 1)
     if good_channels is not None:
         first_channel, last_channel = good_channels
         if first_channel < 1 or last_channel < first_channel:
             raise ValueError("good_channels must be an increasing one-based range.")
         # end if invalid channel range
-        channel_slice = slice(first_channel - 1, last_channel)
-        last_frame_rasters = last_frame_rasters[channel_slice]
-        frame_2250_rasters = frame_2250_rasters[channel_slice]
-        dynamic_rasters = dynamic_rasters[channel_slice]
-        channel_numbers = np.arange(first_channel, last_channel + 1)
-    else:
-        channel_numbers = np.arange(1, dynamic_rasters.shape[0] + 1)
+        channel_numbers = channel_numbers[
+            (channel_numbers >= first_channel) & (channel_numbers <= last_channel)
+        ]
     # end if good_channels
+    if channel_subset is not None:
+        channel_numbers = np.intersect1d(channel_numbers, channel_subset)
+    # end if channel_subset
+    if channel_numbers.size == 0:
+        raise ValueError("The channel selection retains no channels.")
+    # end if empty selection
+    # One-based channel numbers index axis 0 of every aligned neural array.
+    last_frame_rasters = last_frame_rasters[channel_numbers - 1]
+    frame_2250_rasters = frame_2250_rasters[channel_numbers - 1]
+    dynamic_rasters = dynamic_rasters[channel_numbers - 1]
 
     # Downsample after alignment so all neural conditions share the same time grid.
     last_frame_rasters = resample_array(
@@ -757,6 +767,270 @@ def plot_decay_fit_examples(analysis, stimulus_names, stimulus_index=0):
     # end for axis
     axes[0].legend(frameon=False)
     figure.suptitle(f"Fit check: {stimulus_names[stimulus_index]}")
+    figure.tight_layout()
+    return figure, axes
+# EOF
+
+
+"""
+columnwise_cross_correlation
+Pearson-correlate every column of one matrix with every column of another.
+
+INPUT:
+    - first: np.ndarray -> samples x columns values
+    - second: np.ndarray -> samples x columns values with the same sample count
+
+OUTPUT:
+    - correlations: np.ndarray -> first-columns x second-columns Pearson r
+"""
+def columnwise_cross_correlation(first, second):
+    first = first - first.mean(axis=0, keepdims=True)
+    second = second - second.mean(axis=0, keepdims=True)
+    first_norms = np.linalg.norm(first, axis=0)
+    second_norms = np.linalg.norm(second, axis=0)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        return (first.T @ second) / np.outer(first_norms, second_norms)
+    # end with np.errstate
+# EOF
+
+
+"""
+compute_last_frame_acf_coupling
+Relate each stimulus's visual autocorrelation to its last frame with the neural
+autocorrelation to the population response evoked by that last frame.
+
+The visual ACF is r(feature[t], feature[last frame]); the neural ACF is
+r(response[t], mean response in neural_reference_window_ms). Both are computed
+per stimulus. The visual curve inside visual_window_ms is placed on the neural
+time grid and compared with the neural curve shifted by every response lag.
+Visual samples whose neural time at the largest lag reaches the reference
+window are excluded at every lag, because they overlap the reference vector.
+
+INPUT:
+    - data: dict -> output of load_last_frame_decay_data
+    - last_frame_time_ms: float -> designated final movie frame
+    - neural_reference_window_ms: tuple[float, float] -> last-frame response window
+    - visual_window_ms: tuple[float, float] -> visual times entering the comparison
+    - neural_lags_ms: np.ndarray -> neural delays added to every visual time
+    - n_permutations: int -> stimulus-label shuffles for the matched-r null
+    - random_seed: int -> permutation generator seed
+
+OUTPUT:
+    - coupling: dict -> ACF timecourses, per-lag couplings, and permutation nulls
+"""
+def compute_last_frame_acf_coupling(
+        data,
+        last_frame_time_ms=2500,
+        neural_reference_window_ms=(2500, 2600),
+        visual_window_ms=(200, 2500),
+        neural_lags_ms=np.arange(0, 301, 10),
+        n_permutations=1000,
+        random_seed=0,
+        ):
+    neural_times_ms = (
+        np.arange(data["dynamic"].shape[1]) * 1000 / data["neural_fs"]
+    )
+    visual_times_ms = (
+        np.arange(data["visual_features"].shape[1]) * 1000 / data["visual_fs"]
+    )
+    visual_last_index = int(
+        np.argmin(np.abs(visual_times_ms - last_frame_time_ms))
+    )
+    neural_lags_ms = np.asarray(neural_lags_ms, dtype=np.float64)
+    n_stimuli = data["stimuli"].size
+
+    # time x stimuli: every frame up to the last one against that last frame.
+    visual_times_ms = visual_times_ms[:visual_last_index + 1]
+    visual_acf = stimuluswise_reference_correlation(
+        data["visual_features"][:, :visual_last_index + 1, :],
+        data["visual_features"][:, visual_last_index, :],
+    )
+    # time x stimuli: every response against the mean last-frame response.
+    neural_reference = window_mean(
+        data["dynamic"], neural_times_ms, neural_reference_window_ms,
+    )
+    neural_acf = stimuluswise_reference_correlation(
+        data["dynamic"], neural_reference,
+    )
+
+    # Shared comparison grid: neural sample times inside the visual window.
+    grid_ms = neural_times_ms[
+        (neural_times_ms >= visual_window_ms[0])
+        & (neural_times_ms <= min(visual_window_ms[1], visual_times_ms[-1]))
+    ]
+    # grid x stimuli: 60-Hz visual ACF linearly interpolated onto the 100-Hz grid.
+    visual_on_grid = np.column_stack([
+        np.interp(grid_ms, visual_times_ms, visual_acf[:, stimulus_index])
+        for stimulus_index in range(n_stimuli)
+    ])
+
+    # lags x visual stimuli x neural stimuli: diagonal = same movie.
+    cross_correlations = np.full(
+        (neural_lags_ms.size, n_stimuli, n_stimuli), np.nan,
+    )
+    across_stimulus_rho = np.full(neural_lags_ms.size, np.nan)
+    neural_mean_acf = np.full((neural_lags_ms.size, n_stimuli), np.nan)
+    n_samples = np.zeros(neural_lags_ms.size, dtype=int)
+    # Drop samples whose neural time, at the largest lag, overlaps the neural
+    # reference window (circular). The same samples then enter every lag, so
+    # lags differ only in their delay, not in which part of the movie is used.
+    valid = grid_ms + neural_lags_ms.max() < neural_reference_window_ms[0]
+    for lag_index, lag_ms in enumerate(neural_lags_ms):
+        shifted_ms = grid_ms + lag_ms
+        n_samples[lag_index] = valid.sum()
+        if valid.sum() < 3:
+            continue
+        # end if too few samples
+        neural_on_grid = np.column_stack([
+            np.interp(shifted_ms[valid], neural_times_ms, neural_acf[:, index])
+            for index in range(n_stimuli)
+        ])
+        cross_correlations[lag_index] = columnwise_cross_correlation(
+            visual_on_grid[valid], neural_on_grid,
+        )
+        # Across stimuli: does overall similarity to the last frame co-vary?
+        neural_mean_acf[lag_index] = neural_on_grid.mean(axis=0)
+        across_stimulus_rho[lag_index] = spearmanr(
+            visual_on_grid[valid].mean(axis=0), neural_mean_acf[lag_index],
+        )[0]
+    # end for lag_index, lag_ms
+
+    stimulus_indices = np.arange(n_stimuli)
+    matched_r = cross_correlations[:, stimulus_indices, stimulus_indices]
+    off_diagonal = ~np.eye(n_stimuli, dtype=bool)
+    # lags x stimuli: each visual curve against all other movies' neural curves.
+    mismatched_r = np.nanmean(
+        np.where(off_diagonal, cross_correlations, np.nan), axis=2,
+    )
+
+    # Null for the mean matched r: shuffle which neural movie pairs with which
+    # visual movie. The max over lags gives a family-wise threshold.
+    generator = np.random.default_rng(random_seed)
+    null_mean_r = np.full((n_permutations, neural_lags_ms.size), np.nan)
+    for permutation_index in range(n_permutations):
+        permutation = generator.permutation(n_stimuli)
+        null_mean_r[permutation_index] = np.nanmean(
+            cross_correlations[:, stimulus_indices, permutation], axis=1,
+        )
+    # end for permutation_index
+    mean_matched_r = np.nanmean(matched_r, axis=1)
+    max_null = np.nanmax(null_mean_r, axis=1)
+    p_values_fwe = (
+        1 + np.sum(max_null[:, np.newaxis] >= mean_matched_r, axis=0)
+    ) / (n_permutations + 1)
+
+    return {
+        "visual_times_ms": visual_times_ms,
+        "neural_times_ms": neural_times_ms,
+        "visual_acf": visual_acf,
+        "neural_acf": neural_acf,
+        "grid_ms": grid_ms,
+        "neural_lags_ms": neural_lags_ms,
+        "n_samples": n_samples,
+        "matched_r": matched_r,
+        "mismatched_r": mismatched_r,
+        "mean_matched_r": mean_matched_r,
+        "null_mean_r": null_mean_r,
+        "p_values_fwe": p_values_fwe,
+        "visual_mean_acf": visual_on_grid.mean(axis=0),
+        "neural_mean_acf": neural_mean_acf,
+        "across_stimulus_rho": across_stimulus_rho,
+        "visual_label": data["visual_label"],
+        "neural_reference_window_ms": tuple(neural_reference_window_ms),
+        "visual_window_ms": tuple(visual_window_ms),
+    }
+# EOF
+
+
+"""
+plot_last_frame_acf_coupling
+Summarize one visual feature's ACF coupling with the neural ACF.
+
+INPUT:
+    - coupling: dict -> output of compute_last_frame_acf_coupling
+    - title: str | None -> optional figure title
+
+OUTPUT:
+    - figure: matplotlib.figure.Figure -> four-panel summary
+    - axes: np.ndarray -> corresponding axes
+"""
+def plot_last_frame_acf_coupling(coupling, title=None):
+    lags_ms = coupling["neural_lags_ms"]
+    best_lag_index = int(np.nanargmax(coupling["mean_matched_r"]))
+    figure, axes = plt.subplots(1, 4, figsize=(18, 4))
+
+    # A: stimulus-averaged ACF timecourses on their own time axes.
+    curves = (
+        (coupling["visual_times_ms"], coupling["visual_acf"],
+         coupling["visual_label"], "tab:orange"),
+        (coupling["neural_times_ms"], coupling["neural_acf"],
+         "Neural", "tab:blue"),
+    )
+    for times_ms, acf, label, color in curves:
+        mean = np.nanmean(acf, axis=1)
+        sem = np.nanstd(acf, axis=1) / np.sqrt(acf.shape[1])
+        axes[0].plot(times_ms, mean, color=color, label=label)
+        axes[0].fill_between(times_ms, mean - sem, mean + sem, color=color, alpha=0.25)
+    # end for times_ms
+    axes[0].axvspan(*coupling["neural_reference_window_ms"], color="0.85")
+    axes[0].set(
+        xlabel="Time from movie onset (ms)",
+        ylabel="r with last frame / last-frame response",
+        title="ACF to last frame (mean ± SEM)",
+    )
+    axes[0].legend(frameon=False, fontsize=8)
+
+    # B: within-stimulus timecourse coupling, matched vs other movies.
+    null_band = np.nanpercentile(coupling["null_mean_r"], [2.5, 97.5], axis=0)
+    axes[1].fill_between(
+        lags_ms, *null_band, color="0.8", label="Shuffled-pair null 95%",
+    )
+    for values, label, color in (
+            (coupling["matched_r"], "Same movie", "tab:red"),
+            (coupling["mismatched_r"], "Other movies", "0.4"),
+            ):
+        mean = np.nanmean(values, axis=1)
+        sem = np.nanstd(values, axis=1) / np.sqrt(values.shape[1])
+        axes[1].plot(lags_ms, mean, color=color, label=label)
+        axes[1].fill_between(lags_ms, mean - sem, mean + sem, color=color, alpha=0.25)
+    # end for values
+    axes[1].set(
+        xlabel="Neural lag (ms)", ylabel="Visual–neural ACF r",
+        title="Timecourse coupling per stimulus",
+    )
+    axes[1].legend(frameon=False, fontsize=8)
+
+    # C: across-stimulus association of the window-averaged ACF.
+    axes[2].plot(lags_ms, coupling["across_stimulus_rho"], color="tab:green")
+    axes[2].axhline(0, color="0.5", linewidth=0.8)
+    axes[2].set(
+        xlabel="Neural lag (ms)", ylabel="Spearman ρ across stimuli",
+        title="Mean visual ACF vs mean neural ACF",
+    )
+
+    # D: matched r per stimulus at the best lag.
+    best_matched = coupling["matched_r"][best_lag_index]
+    best_mismatched = coupling["mismatched_r"][best_lag_index]
+    axes[3].scatter(best_mismatched, best_matched, s=18, alpha=0.7)
+    limits = [
+        np.nanmin([best_matched, best_mismatched]),
+        np.nanmax([best_matched, best_mismatched]),
+    ]
+    axes[3].plot(limits, limits, color="0.5", linewidth=0.8)
+    axes[3].set(
+        xlabel="r with other movies' neural ACF",
+        ylabel="r with same movie's neural ACF",
+        title=(
+            f"Lag {lags_ms[best_lag_index]:.0f} ms, "
+            f"p_FWE={coupling['p_values_fwe'][best_lag_index]:.3g}"
+        ),
+    )
+    for axis in axes:
+        axis.grid(alpha=0.2)
+    # end for axis
+    if title is not None:
+        figure.suptitle(title)
+    # end if title
     figure.tight_layout()
     return figure, axes
 # EOF
