@@ -1,4 +1,5 @@
 import numpy as np
+from sklearn.model_selection import KFold
 
 from useful_stuff.general_utils import TimeSeries, dyn_linear_encoding
 
@@ -262,4 +263,114 @@ def static_pattern_regress_out(
 
     residual_ts = TimeSeries(residual_array, fs=dynamic_ts.get_fs())
     return residual_ts, variance_explained
+# EOF
+
+
+"""
+encoding_timecourse
+Cross-validated linear encoding of a neural response timecourse from one
+static model feature pattern. At every neural timepoint an independent ridge
+model maps the model features to the channel pattern across stimuli
+(dyn_linear_encoding.crossvalidate_static_dyn), and the held-out score is
+averaged over channels. The stimulus folds are fixed (seeded), so every
+timepoint, layer and condition is scored on the same train/test splits.
+
+INPUT:
+    - model_features: np.ndarray -> features x stimuli predictor pattern.
+    - neural_rasters: np.ndarray -> channels x time x stimuli response.
+    - fs: float -> sampling rate of neural_rasters (Hz).
+    - regression_type: str -> useful_stuff regression model type.
+    - alphas: tuple[float, ...] -> ridge penalties searched by RidgeCV.
+    - n_splits: int -> number of stimulus folds.
+    - score_type: str -> "r2" (per channel and fold, then averaged), "corr"
+        (useful_stuff pattern correlation), or "r2_pooled": the held-out
+        predictions of all folds are collected first and R2 is computed once
+        per channel over every stimulus, then averaged over channels. Pooling
+        avoids scoring each small test fold against its own mean, which
+        pushes the fold-wise R2 of an uninformative model to about -n_test /
+        (n_test - 1) * (1 / n_test + 1 / n_train) instead of about 0.
+        "corr_pooled" uses the same pooled held-out predictions but scores
+        each channel by its Pearson correlation with the response across
+        stimuli (insensitive to offset and scale errors of the prediction),
+        then averages over channels.
+    - random_state: int -> seed of the shuffled stimulus folds.
+    - alpha_per_target: bool -> RidgeCV picks a separate penalty for every
+        channel instead of one shared penalty for all channels.
+
+OUTPUT:
+    - scores: np.ndarray -> (time,) cross-validated encoding score.
+"""
+def encoding_timecourse(
+        model_features: np.ndarray,
+        neural_rasters: np.ndarray,
+        fs: float,
+        regression_type: str = "ridge",
+        alphas: tuple[float, ...] = tuple(10.0 ** np.arange(-2, 11)),
+        n_splits: int = 5,
+        score_type: str = "r2",
+        random_state: int = 0,
+        alpha_per_target: bool = False,
+        ) -> np.ndarray:
+    model_features = np.asarray(model_features, dtype=float)
+    neural_rasters = np.asarray(neural_rasters, dtype=float)
+    if model_features.shape[1] != neural_rasters.shape[2]:
+        raise ValueError("Model features and neural responses must share stimuli.")
+    # end if stimulus counts differ
+    regression_model = dyn_linear_encoding(
+        regression_type=regression_type,
+        cv_type="kf",
+        max_lag=0,
+        score_type="r2" if score_type in ("r2_pooled", "corr_pooled") else score_type,
+        n_splits=n_splits,
+        alphas=np.asarray(alphas),
+        # Forwarded to RidgeCV; one penalty per output channel when True.
+        alpha_per_target=alpha_per_target,
+    )
+    # choose_CV_type has no seed, so the shuffled KFold is replaced by a
+    # seeded one: otherwise every timepoint would get different folds.
+    regression_model.cv_obj = KFold(
+        n_splits=n_splits, shuffle=True, random_state=random_state,
+    )
+    if score_type in ("r2_pooled", "corr_pooled"):
+        # channels x time x stimuli held-out predictions, one fold at a time;
+        # fit_static_dyn fits an independent model at every timepoint.
+        predicted = np.empty_like(neural_rasters)
+        for train_index, test_index in regression_model.cv_obj.split(model_features.T):
+            regression_model.fit_static_dyn(
+                model_features[:, train_index],
+                TimeSeries(neural_rasters[:, :, train_index], fs=fs),
+            )
+            fold_prediction = regression_model.predict_static_dyn(
+                model_features[:, test_index],
+            )
+            # list of channels x test stimuli arrays -> channels x time x stimuli
+            fold_prediction.to_numpy()
+            predicted[:, :, test_index] = fold_prediction.get_array()
+        # end for train_index, test_index
+        if score_type == "corr_pooled":
+            # Pearson r across stimuli per channel and timepoint.
+            response_centered = neural_rasters - neural_rasters.mean(axis=2, keepdims=True)
+            predicted_centered = predicted - predicted.mean(axis=2, keepdims=True)
+            with np.errstate(divide="ignore", invalid="ignore"):
+                channel_corr = (response_centered * predicted_centered).sum(axis=2) / np.sqrt(
+                    (response_centered ** 2).sum(axis=2) * (predicted_centered ** 2).sum(axis=2)
+                )
+            # end with np.errstate
+            return np.nanmean(channel_corr, axis=0)
+        # end if pooled correlation
+        # R2 over all stimuli per channel and timepoint; flat channels -> NaN.
+        residual_power = ((neural_rasters - predicted) ** 2).sum(axis=2)
+        total_power = (
+            (neural_rasters - neural_rasters.mean(axis=2, keepdims=True)) ** 2
+        ).sum(axis=2)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            channel_r2 = 1 - residual_power / total_power
+        # end with np.errstate
+        return np.nanmean(channel_r2, axis=0)
+    # end if pooled R2
+    # r2: channels x time; corr: 1 x time (pattern correlation).
+    time_scores = regression_model.crossvalidate_static_dyn(
+        model_features, TimeSeries(neural_rasters, fs=fs), transpose=True,
+    ).get_array()
+    return np.nanmean(time_scores, axis=0)
 # EOF

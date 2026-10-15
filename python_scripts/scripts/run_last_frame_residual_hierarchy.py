@@ -40,14 +40,17 @@ from useful_stuff.general_utils import TimeSeries
 
 # (dynamic session, static session, channel range, reliable-channel key).
 MONKEY_SESSIONS = {
-    "baby1": ("baby1_260716to24", "baby1_260718to27", (84, 186), None),
+    "baby1": (
+        "baby1_260716to0928", "baby1_260718to0727", (84, 186),
+        "baby1_260718to0727",
+    ),
     "red": (
-        "red_20260720to0926", "red_20260726to0923", (1, 64),
-        "red_20260726to0923",
+        "red_20260720to0928", "red_20260726to0925", (1, 64),
+        "red_20260726to0925",
     ),
     "paul": (
-        "paul_20260831to0926", "paul_20260901to0925", (1, 64),
-        "paul_20260901to0923",
+        "paul_20260831to0927", "paul_20260901to0925", (1, 64),
+        "paul_20260901to0925",
     ),
 }
 
@@ -79,6 +82,8 @@ class Cfg:
     previous_frame_ms: float = 2250
     last_frame_ms: float = 2500
     regression_fit_intercept: bool = True
+    # "rdm" regresses model RDMs; "features" regresses unit-wise features.
+    regression_level: str = "rdm"
     # End-exclusive neural-time windows for the two latency measures.
     centroid_window_ms: tuple[float, float] = (2300, 2700)
     peak_window_ms: tuple[float, float] = (2300, 2700)
@@ -109,6 +114,8 @@ def parse_args() -> Cfg:
     parser.add_argument("--monkeys", nargs="+", choices=tuple(MONKEY_SESSIONS))
     parser.add_argument("--model_names", nargs="+")
     parser.add_argument("--model_pooling")
+    parser.add_argument("--previous_frame_ms", type=float)
+    parser.add_argument("--regression_level", choices=("rdm", "features"))
     parser.add_argument("--output_dir")
     parser.add_argument("--figs_dir")
     args = parser.parse_args()
@@ -124,15 +131,20 @@ def parse_args() -> Cfg:
         parser.error(f"Unknown model names {unknown_names}.")
     # end if unknown model names
     pooling_name = cfg.model_pooling or "none"
+    # Non-default predictors get their own folder so earlier runs are kept.
+    run_name = f"{pooling_name}pool"
+    if cfg.previous_frame_ms != 2250 or cfg.regression_level != "rdm":
+        run_name += f"_prev{cfg.previous_frame_ms:g}_{cfg.regression_level}"
+    # end if non-default predictor
     cfg.output_dir = str(Path(
         cfg.output_dir
         or PROJECT_ROOT / "results" / "last_frame_residual_hierarchy"
-        / f"{pooling_name}pool"
+        / run_name
     ))
     cfg.figs_dir = str(Path(
         cfg.figs_dir
         or Path(paths["data_path"]) / "results"
-        / "figs_last_frame_residual_hierarchy" / f"{pooling_name}pool"
+        / "figs_last_frame_residual_hierarchy" / run_name
     ))
     Path(cfg.output_dir).mkdir(parents=True, exist_ok=True)
     Path(cfg.figs_dir).mkdir(parents=True, exist_ok=True)
@@ -226,7 +238,7 @@ def analyze_model(
         Path(paths["data_path"]) / "models", model_name,
         cfg.model_dataset_name, cfg.model_pooling, cfg.analysis_fs,
         cfg.previous_frame_ms, cfg.last_frame_ms, cfg.model_rdm_metric,
-        cfg.rsa_metric, cfg.regression_fit_intercept,
+        cfg.rsa_metric, cfg.regression_fit_intercept, cfg.regression_level,
     )
     layer_depths = np.linspace(0, 1, len(layer_names))
     arrays = {
