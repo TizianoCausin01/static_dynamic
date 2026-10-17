@@ -68,7 +68,7 @@ def window_mean_responses(
 window_smoothed_response_latencies
 Gaussian-smooth a channels x time x stimuli raster, then summarize each
 channel-stimulus timecourse by its peak and positive-mass centroid latency.
-Smoothing is applied before windowing so the requested window does not create
+A smoothing_sigma_ms of 0 skips the smoothing. Smoothing is applied before windowing so the requested window does not create
 artificial filter edges. Centroids are undefined when a window has no positive
 response mass.
 
@@ -76,7 +76,8 @@ INPUT:
     - rasters: np.ndarray -> channels x time x stimuli neural responses
     - window_ms: tuple[float, float] -> start and exclusive end in milliseconds
     - fs: float -> raster sampling frequency in Hz
-    - smoothing_sigma_ms: float -> Gaussian standard deviation in milliseconds
+    - smoothing_sigma_ms: float -> Gaussian standard deviation in milliseconds;
+        0 keeps the raw responses
 
 OUTPUT:
     - peak_responses: np.ndarray -> channels x stimuli smoothed peak responses
@@ -102,8 +103,8 @@ def window_smoothed_response_latencies(
     if fs <= 0:
         raise ValueError("fs must be positive.")
     # end if fs
-    if smoothing_sigma_ms <= 0:
-        raise ValueError("smoothing_sigma_ms must be positive.")
+    if smoothing_sigma_ms < 0:
+        raise ValueError("smoothing_sigma_ms must be non-negative.")
     # end if smoothing sigma
     if not np.all(np.isfinite(rasters)):
         raise ValueError("rasters contain non-finite values.")
@@ -129,10 +130,15 @@ def window_smoothed_response_latencies(
         raise ValueError("window_ms selects no raster samples.")
     # end if empty window
 
-    sigma_samples = smoothing_sigma_ms * fs / 1000
-    smoothed_rasters = gaussian_filter1d(
-        rasters, sigma=sigma_samples, axis=1, mode="nearest",
-    )
+    if smoothing_sigma_ms > 0:
+        sigma_samples = smoothing_sigma_ms * fs / 1000
+        smoothed_rasters = gaussian_filter1d(
+            rasters, sigma=sigma_samples, axis=1, mode="nearest",
+        )
+    else:
+        # sigma 0: peaks and centroids of the raw responses.
+        smoothed_rasters = rasters
+    # end if smoothing
     windowed_rasters = smoothed_rasters[:, start_index:end_index, :]
     peak_offsets = np.argmax(windowed_rasters, axis=1)
     peak_responses = np.take_along_axis(
@@ -169,14 +175,16 @@ def window_smoothed_response_latencies(
 
 """
 window_peak_responses
-Gaussian-smooth a channels x time x stimuli raster, then return each
-channel-stimulus peak and its absolute latency inside a half-open time window.
+Gaussian-smooth a channels x time x stimuli raster (sigma 0 skips it), then
+return each channel-stimulus peak and its absolute latency inside a half-open
+time window.
 
 INPUT:
     - rasters: np.ndarray -> channels x time x stimuli neural responses
     - window_ms: tuple[float, float] -> start and exclusive end in milliseconds
     - fs: float -> raster sampling frequency in Hz
-    - smoothing_sigma_ms: float -> Gaussian standard deviation in milliseconds
+    - smoothing_sigma_ms: float -> Gaussian standard deviation in milliseconds;
+        0 keeps the raw responses
 
 OUTPUT:
     - peak_responses: np.ndarray -> channels x stimuli smoothed peak responses
